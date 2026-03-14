@@ -1,447 +1,657 @@
-// USDC lending pool - uses test_usdcx_stablecoin.aleo (USDCx) for deposit & repay only.
-//  - Deposit: Real USDCx — user sends token to pool vault; state updated after transfer.
-//  - Repay: Real USDCx — user sends token to pool vault; state updated after transfer.
-//  - Withdraw: State only. Caller’s withdrawal recorded; backend sends USDCx from vault to user.
-//  - Borrow: State only. Caller’s borrow recorded; backend sends USDCx from vault to user.
+// ============================================================
+// lending_pool_usdce_v2.aleo
+// Production-Ready Aave-Style USDC Lending Pool on Aleo
+//
+// Architecture: Mirrors lending_pool_v2.aleo (credits pool)
+//               but uses test_usdcx_stablecoin.aleo (USDCx)
+//               for deposit & repay token transfers.
+//
+// Key difference from credits pool:
+//   - deposit/repay: Real USDCx transfer via transfer_private
+//   - withdraw/borrow: State-only — backend sends USDCx
+//   - withdraw_fees: State-only — backend sends USDCx
+//
+// Features:
+//   - Aave-style cumulative liquidity/borrow indices
+//   - Utilization-based interest rate model
+//   - Supply rate with protocol reserve factor
+//   - APY exposure (supply_apy, borrow_apy)
+//   - Overcollateralized lending (75% LTV)
+//   - Withdraw collateral safety check
+//   - Pool accounting (total_deposited, total_borrowed, available_liquidity)
+//   - Protocol fee accumulation
+//   - Privacy via BHP256::hash_to_field(address)
+//   - Permissionless accrue_interest() transition
+//
+// Leo 3.x syntax:
+//   - fn + final { } blocks replace async transition + async function
+//   - Final type replaces Future
+//   - f.run() replaces f.await()
+//   - self.caller available in fn, passed to final fn as param
+//   - @admin constructor body must be empty
+// ============================================================
 
 import test_usdcx_stablecoin.aleo;
 
-program lending_pool_usdce_v86.aleo {
-    // ---- Constants ----
-    // SCALE is the fixed-point scale for utilization/interest calculations (1e6).
-    // All pool amounts (totals, user totals, amounts) are stored in micro-USDC (1 USDC = 1_000_000 units).
-    const SCALE: u64 = 1_000_000u64;
-    const GLOBAL_KEY: u8 = 0u8;
-    // Vault address that holds pool USDCx. Deposits/repays send here; withdraw/borrow spend from here.
-    const POOL_VAULT_ADDRESS: address = aleo1a2ehlgqhvs3p7d4hqhs0tvgk954dr8gafu9kxse2mzu9a5sqxvpsrn98pr;
+program lending_pool_usdce_v2.aleo {
 
-    // ---- Interest / APY (v86-style; INDEX_SCALE = 1e12) ----
-    const INDEX_SCALE: u64 = 1_000_000_000_000u64;
-    const BASE_RATE_PER_BLOCK: u64 = 1000u64;
-    const SLOPE_PER_UTIL: u64 = 6667u64;
-    const RESERVE_FACTOR_BPS: u64 = 1000u64;
+    // ================================================================
+    // CONSTANTS
+    // ================================================================
+
+    /// Fixed-point scale for cumulative indices (1e12).
+    const INDEX_SCALE: u64       = 1_000_000_000_000u64;
+
+    /// Basis-point denominator (10 000 bps = 100%).
+    const SCALE: u64             = 10_000u64;
+
+    /// Estimated Aleo blocks per year (~4s block time).
+    const BLOCKS_PER_YEAR: u64   = 2_102_400u64;
+
+    /// Cap per-tx accrual delta to prevent u64 overflow in
+    /// (index * rate * delta) / INDEX_SCALE.
     const MAX_ACCRUAL_DELTA: u64 = 1_000u64;
 
-    // ---- Public Aggregates (Pool State) ----
-    mapping total_supplied: u8 => u64;
-    mapping total_borrowed: u8 => u64;
-    mapping utilization_index: u8 => u64;
-    mapping liquidity_index: u8 => u64;
-    mapping borrow_index: u8 => u64;
-    mapping last_update_block: u8 => u64;
+    /// Pool vault — holds all USDCx balances on behalf of the pool.
+    const POOL_VAULT_ADDRESS: address =
+        aleo1a2ehlgqhvs3p7d4hqhs0tvgk954dr8gafu9kxse2mzu9a5sqxvpsrn98pr;
 
-    // ---- Private User Records ----
+    // ---- Interest Rate Model ----
+    /// 2% annual base borrow rate in basis points.
+    const BASE_RATE: u64         = 200u64;
+
+    /// Slope: +4% borrow rate per 100% utilization, in basis points.
+    const SLOPE_RATE: u64        = 400u64;
+
+    /// Reserve factor: 10% of interest accrued goes to protocol treasury.
+    const RESERVE_FACTOR: u64    = 1_000u64;
+
+    /// LTV: borrowers may borrow up to 75% of their collateral value.
+    const LTV_FACTOR: u64        = 7_500u64;
+
+    // ================================================================
+    // POOL STATE MAPPINGS  (key = 0field for single-asset pool)
+    // ================================================================
+
+    /// Total principal deposited (grows on deposit, shrinks on withdraw).
+    mapping total_deposited:     field => u64;
+
+    /// Total outstanding borrows (principal-equivalent).
+    mapping total_borrowed:      field => u64;
+
+    /// Available liquidity = total_deposited - total_borrowed.
+    mapping available_liquidity: field => u64;
+
+    /// Cumulative supply (liquidity) index; initialised to INDEX_SCALE.
+    mapping supply_index:        field => u64;
+
+    /// Cumulative borrow index; initialised to INDEX_SCALE.
+    mapping borrow_index:        field => u64;
+
+    /// Last block at which indices were accrued.
+    mapping last_accrual_block:  field => u64;
+
+    /// Accumulated protocol reserve fees.
+    mapping protocol_fees:       field => u64;
+
+    /// Annualised supply APY in basis points (read-only for UIs).
+    mapping supply_apy:          field => u64;
+
+    /// Annualised borrow APY in basis points (read-only for UIs).
+    mapping borrow_apy:          field => u64;
+
+    /// Guard: pool can only be initialized once.
+    mapping initialized:         field => bool;
+
+    // ================================================================
+    // USER STATE MAPPINGS  (keys = BHP256::hash_to_field(address))
+    // ================================================================
+
+    /// real_balance = user_scaled_supply * supply_index / INDEX_SCALE
+    mapping user_scaled_supply:  field => u64;
+
+    /// real_debt = user_scaled_borrow * borrow_index / INDEX_SCALE
+    mapping user_scaled_borrow:  field => u64;
+
+    // ================================================================
+    // RECORDS
+    // ================================================================
+
     record UserActivity {
-        owner: address,
-        total_deposits: u64,
+        owner:             address,
+        asset_id:          field,
+        total_deposits:    u64,
         total_withdrawals: u64,
-        total_borrows: u64,
-        total_repayments: u64,
+        total_borrows:     u64,
+        total_repayments:  u64,
     }
 
-    // ---- Private User Mappings (hashed keys for privacy) ----
-    mapping user_total_deposits: field => u64;
-    mapping user_total_withdrawals: field => u64;
-    mapping user_total_borrows: field => u64;
-    mapping user_total_repayments: field => u64;
-    mapping user_scaled_supply: field => u64;
-    mapping user_scaled_borrow: field => u64;
+    // ================================================================
+    // CONSTRUCTOR
+    // @admin body must be empty — Leo inserts the admin guard automatically.
+    // Call initialize() once after deployment to seed mapping values.
+    // ================================================================
 
-    // ---- Constructor ----
-    @admin(address = "aleo1rhgdu77hgyqd3xjj8ucu3jj9r2krwz6mnzyd80gncr5fxcwlh5rsvzp9px")
-    async constructor() {}
+    @admin(address = "aleo1v0ufeajsjwr3lnyq8qay54x3sg7e4ld0287hdt72glr3lhjmn5zqzwnexq")
+    constructor() {}
 
-    // ==================== TRANSITIONS (USDCx) ====================
+    /// One-time initialisation — must be called by the admin after deploy.
+    fn initialize() -> Final {
+        assert(self.caller == aleo1v0ufeajsjwr3lnyq8qay54x3sg7e4ld0287hdt72glr3lhjmn5zqzwnexq);
+        return final { finalize_initialize(); };
+    }
 
-    // 1) DEPOSIT: User sends USDCx to pool. transfer_private(recipient, amount, token, proofs) per NullPay.
-    //    `amount` is in micro-USDC (smallest units; 1 USDC = 1_000_000).
-    async transition deposit(
-        token: test_usdcx_stablecoin.aleo/Token,
-        public amount: u64,
+    // ================================================================
+    // TRANSITIONS (user-facing — signatures preserved for frontend)
+    // ================================================================
+
+    // ----------------------------------------------------------------
+    // 1) DEPOSIT — user sends private USDCx to the pool vault.
+    // ----------------------------------------------------------------
+    fn deposit(
+        token:                test_usdcx_stablecoin.aleo/Token,
+        public amount:        u64,
         public current_block: u64,
-        proofs: [MerkleProof; 2]
-    ) -> (UserActivity, test_usdcx_stablecoin.aleo/Token, test_usdcx_stablecoin.aleo/Token, Future) {
-        let caller: address = self.caller;
+        proofs:               [test_usdcx_stablecoin.aleo/MerkleProof; 2]
+    ) -> (UserActivity, test_usdcx_stablecoin.aleo/Token, test_usdcx_stablecoin.aleo/Token, Final) {
         assert(amount > 0u64);
+        let caller: address = self.caller;
         assert(caller == token.owner);
 
-        // amount is already in micro-USDC; token.amount is also in smallest units.
         let amount_u128: u128 = (amount as u128);
         assert(token.amount >= amount_u128);
 
-        let user_hash: field = BHP256::hash_to_field(caller);
+        let user_key: field = BHP256::hash_to_field(caller);
 
-        let (compliance_out, to_user, to_pool, token_future): (test_usdcx_stablecoin.aleo/ComplianceRecord, test_usdcx_stablecoin.aleo/Token, test_usdcx_stablecoin.aleo/Token, Future) =
+        let (compliance_out, to_pool, to_user, f_transfer): (test_usdcx_stablecoin.aleo/ComplianceRecord, test_usdcx_stablecoin.aleo/Token, test_usdcx_stablecoin.aleo/Token, Final) =
             test_usdcx_stablecoin.aleo/transfer_private(POOL_VAULT_ADDRESS, amount_u128, token, proofs);
 
-        let updated: UserActivity = UserActivity {
-            owner: caller,
-            total_deposits: amount,
+        let receipt: UserActivity = UserActivity {
+            owner:             caller,
+            asset_id:          1field,
+            total_deposits:    amount,
             total_withdrawals: 0u64,
-            total_borrows: 0u64,
-            total_repayments: 0u64,
+            total_borrows:     0u64,
+            total_repayments:  0u64,
         };
 
-        let f: Future = finalize_deposit(amount, user_hash, current_block, token_future);
-        return (updated, to_pool, to_user, f);
+        return (receipt, to_pool, to_user, final { finalize_deposit(f_transfer, amount, user_key, current_block); });
     }
 
-    // 2) REPAY: User sends USDCx to pool. Same transfer_private pattern as deposit.
-    //    `amount` is in micro-USDC (smallest units; 1 USDC = 1_000_000).
-    async transition repay(
-        token: test_usdcx_stablecoin.aleo/Token,
-        public amount: u64,
+    // ----------------------------------------------------------------
+    // 2) REPAY — user sends private USDCx to the pool vault.
+    // ----------------------------------------------------------------
+    fn repay(
+        token:                test_usdcx_stablecoin.aleo/Token,
+        public amount:        u64,
         public current_block: u64,
-        proofs: [MerkleProof; 2]
-    ) -> (UserActivity, test_usdcx_stablecoin.aleo/Token, test_usdcx_stablecoin.aleo/Token, Future) {
-        let caller: address = self.caller;
+        proofs:               [test_usdcx_stablecoin.aleo/MerkleProof; 2]
+    ) -> (UserActivity, test_usdcx_stablecoin.aleo/Token, test_usdcx_stablecoin.aleo/Token, Final) {
         assert(amount > 0u64);
+        let caller: address = self.caller;
         assert(caller == token.owner);
-        // amount is already in micro-USDC; token.amount is also in smallest units.
+
         let amount_u128: u128 = (amount as u128);
         assert(token.amount >= amount_u128);
 
-        let user_hash: field = BHP256::hash_to_field(caller);
+        let user_key: field = BHP256::hash_to_field(caller);
 
-        let (compliance_out, to_user, to_pool, token_future): (test_usdcx_stablecoin.aleo/ComplianceRecord, test_usdcx_stablecoin.aleo/Token, test_usdcx_stablecoin.aleo/Token, Future) =
+        let (compliance_out, to_pool, to_user, f_transfer): (test_usdcx_stablecoin.aleo/ComplianceRecord, test_usdcx_stablecoin.aleo/Token, test_usdcx_stablecoin.aleo/Token, Final) =
             test_usdcx_stablecoin.aleo/transfer_private(POOL_VAULT_ADDRESS, amount_u128, token, proofs);
 
-        let updated: UserActivity = UserActivity {
-            owner: caller,
-            total_deposits: 0u64,
+        let receipt: UserActivity = UserActivity {
+            owner:             caller,
+            asset_id:          1field,
+            total_deposits:    0u64,
             total_withdrawals: 0u64,
-            total_borrows: 0u64,
-            total_repayments: amount,
+            total_borrows:     0u64,
+            total_repayments:  amount,
         };
 
-        let f: Future = finalize_repay(amount, user_hash, current_block, token_future);
-        return (updated, to_pool, to_user, f);
+        return (receipt, to_pool, to_user, final { finalize_repay(f_transfer, amount, user_key, current_block); });
     }
 
-    // 3) WITHDRAW: State only. Caller is the user withdrawing; backend sends USDCx from vault to user.
-    async transition withdraw(public amount: u64, public current_block: u64) -> (UserActivity, Future) {
+    // ----------------------------------------------------------------
+    // 3) WITHDRAW — state-only; backend sends USDCx from vault to user.
+    // ----------------------------------------------------------------
+    fn withdraw(
+        public amount:        u64,
+        public current_block: u64
+    ) -> (UserActivity, Final) {
         assert(amount > 0u64);
         let caller: address = self.caller;
-        let user_hash: field = BHP256::hash_to_field(caller);
+        let user_key: field = BHP256::hash_to_field(caller);
 
-        let updated: UserActivity = UserActivity {
-            owner: caller,
-            total_deposits: 0u64,
+        let receipt: UserActivity = UserActivity {
+            owner:             caller,
+            asset_id:          1field,
+            total_deposits:    0u64,
             total_withdrawals: amount,
-            total_borrows: 0u64,
-            total_repayments: 0u64,
+            total_borrows:     0u64,
+            total_repayments:  0u64,
         };
 
-        let f: Future = finalize_withdraw(amount, user_hash, current_block);
-        return (updated, f);
+        return (receipt, final { finalize_withdraw(amount, user_key, current_block); });
     }
 
-    // 4) BORROW: State only. Caller is the borrower; backend sends USDCx from vault to user.
-    async transition borrow(public amount: u64, public current_block: u64) -> (UserActivity, Future) {
+    // ----------------------------------------------------------------
+    // 4) BORROW — state-only; backend sends USDCx from vault to user.
+    // ----------------------------------------------------------------
+    fn borrow(
+        public amount:        u64,
+        public current_block: u64
+    ) -> (UserActivity, Final) {
         assert(amount > 0u64);
         let caller: address = self.caller;
-        let user_hash: field = BHP256::hash_to_field(caller);
+        let user_key: field = BHP256::hash_to_field(caller);
 
-        let updated: UserActivity = UserActivity {
-            owner: caller,
-            total_deposits: 0u64,
+        let receipt: UserActivity = UserActivity {
+            owner:             caller,
+            asset_id:          1field,
+            total_deposits:    0u64,
             total_withdrawals: 0u64,
-            total_borrows: amount,
-            total_repayments: 0u64,
+            total_borrows:     amount,
+            total_repayments:  0u64,
         };
 
-        let f: Future = finalize_borrow(amount, user_hash, current_block);
-        return (updated, f);
+        return (receipt, final { finalize_borrow(amount, user_key, current_block); });
     }
 
-    // 5) Accrue interest (v86: updates liquidity_index and borrow_index from current_block)
-    async transition accrue_interest(public current_block: u64) -> Future {
-        let f: Future = finalize_accrue(current_block);
-        return f;
+    // ----------------------------------------------------------------
+    // 5) ACCRUE INTEREST — permissionless; syncs indices without a
+    //    deposit/withdraw/borrow/repay. Useful for keepers / UIs.
+    // ----------------------------------------------------------------
+    fn accrue_interest(public current_block: u64) -> Final {
+        return final { finalize_accrue(current_block); };
     }
 
-    transition get_address_hash() -> field {
+    // ----------------------------------------------------------------
+    // 6) WITHDRAW FEES — admin withdraws accumulated protocol fees.
+    //    State-only: backend reads event and sends USDCx separately.
+    // ----------------------------------------------------------------
+    fn withdraw_fees(public amount: u64) -> Final {
+        assert(amount > 0u64);
         let caller: address = self.caller;
-        let user_hash: field = BHP256::hash_to_field(caller);
-        return user_hash;
+        return final { finalize_withdraw_fees(amount, caller); };
     }
+}
 
-    async transition get_user_activity() -> (UserActivity, Future) {
-        let caller: address = self.caller;
-        let user_hash: field = BHP256::hash_to_field(caller);
+// ================================================================
+// FINAL FUNCTIONS (on-chain finalize logic)
+//
+// Restrictions:
+//   - No variable re-assignment across if-block scope boundaries —
+//     every variable is declared exactly once via ternary expressions.
+//   - External program Finals executed via .run()
+//   - Interest accrual fully inlined (no helper chaining).
+// ================================================================
 
-        let placeholder: UserActivity = UserActivity {
-            owner: caller,
-            total_deposits: 0u64,
-            total_withdrawals: 0u64,
-            total_borrows: 0u64,
-            total_repayments: 0u64,
-        };
+// ----------------------------------------------------------------
+// FINALIZE INITIALIZE
+// ----------------------------------------------------------------
+final fn finalize_initialize() {
+    let already: bool = Mapping::get_or_use(initialized, 0field, false);
+    assert(!already);
 
-        let f: Future = finalize_get_user_activity(user_hash);
-        return (placeholder, f);
-    }
+    let id: field = 0field;
+    Mapping::set(supply_index,        id, INDEX_SCALE);
+    Mapping::set(borrow_index,        id, INDEX_SCALE);
+    Mapping::set(last_accrual_block,  id, 0u64);
+    Mapping::set(total_deposited,     id, 0u64);
+    Mapping::set(total_borrowed,      id, 0u64);
+    Mapping::set(available_liquidity, id, 0u64);
+    Mapping::set(protocol_fees,       id, 0u64);
+    Mapping::set(supply_apy,          id, BASE_RATE);
+    Mapping::set(borrow_apy,          id, BASE_RATE);
 
-    // ==================== FINALIZE FUNCTIONS ====================
+    Mapping::set(initialized, 0field, true);
+}
 
-    async function finalize_deposit(amount: u64, user_hash: field, current_block: u64, token_future: Future) {
-        token_future.await();
-        let lub: u64 = Mapping::get_or_use(last_update_block, GLOBAL_KEY, 0u64);
-        if current_block > lub {
-            let delta: u64 = current_block - lub;
-            let effective_delta: u64 = (delta > MAX_ACCRUAL_DELTA) ? MAX_ACCRUAL_DELTA : delta;
-            last_update_block.set(GLOBAL_KEY, lub + effective_delta);
-            let ts: u64 = Mapping::get_or_use(total_supplied, GLOBAL_KEY, 0u64);
-            if ts > 0u64 {
-                let tb: u64 = Mapping::get_or_use(total_borrowed, GLOBAL_KEY, 0u64);
-                let li: u64 = Mapping::get_or_use(liquidity_index, GLOBAL_KEY, INDEX_SCALE);
-                let bi: u64 = Mapping::get_or_use(borrow_index, GLOBAL_KEY, INDEX_SCALE);
-                let util: u64 = (tb * SCALE) / ts;
-                let br: u64 = BASE_RATE_PER_BLOCK + (SLOPE_PER_UTIL * util) / SCALE;
-                let sr: u64 = (br * util * (10000u64 - RESERVE_FACTOR_BPS)) / (SCALE * 10000u64);
-                let li_new: u64 = li + (li * sr * effective_delta) / INDEX_SCALE;
-                let bi_new: u64 = bi + (bi * br * effective_delta) / INDEX_SCALE;
-                liquidity_index.set(GLOBAL_KEY, li_new);
-                borrow_index.set(GLOBAL_KEY, bi_new);
-            }
-        }
-        let li: u64 = Mapping::get_or_use(liquidity_index, GLOBAL_KEY, INDEX_SCALE);
-        let scaled_delta: u64 = (amount * INDEX_SCALE) / li;
-        let prev_scaled: u64 = Mapping::get_or_use(user_scaled_supply, user_hash, 0u64);
-        Mapping::set(user_scaled_supply, user_hash, prev_scaled + scaled_delta);
+// ----------------------------------------------------------------
+// FINALIZE DEPOSIT
+// ----------------------------------------------------------------
+final fn finalize_deposit(
+    f_transfer:    Final,
+    amount:        u64,
+    user_key:      field,
+    current_block: u64
+) {
+    // 1. Confirm vault received the funds.
+    f_transfer.run();
 
-        let current_deposits: u64 = Mapping::get_or_use(user_total_deposits, user_hash, 0u64);
-        let new_total_deposits: u64 = current_deposits + amount;
-        Mapping::set(user_total_deposits, user_hash, new_total_deposits);
+    let id: field = 0field;
 
-        if total_supplied.contains(GLOBAL_KEY) && total_borrowed.contains(GLOBAL_KEY) {
-            let prev_supplied: u64 = total_supplied.get(GLOBAL_KEY);
-            let prev_borrowed: u64 = total_borrowed.get(GLOBAL_KEY);
-            let new_supplied: u64 = prev_supplied + amount;
-            total_supplied.set(GLOBAL_KEY, new_supplied);
-            if new_supplied == 0u64 {
-                utilization_index.set(GLOBAL_KEY, 0u64);
-            } else {
-                let util: u64 = (prev_borrowed * SCALE) / new_supplied;
-                utilization_index.set(GLOBAL_KEY, util);
-            }
-        } else if total_supplied.contains(GLOBAL_KEY) {
-            let prev_supplied: u64 = total_supplied.get(GLOBAL_KEY);
-            let new_supplied: u64 = prev_supplied + amount;
-            total_supplied.set(GLOBAL_KEY, new_supplied);
-            if new_supplied == 0u64 {
-                utilization_index.set(GLOBAL_KEY, 0u64);
-            } else {
-                let util: u64 = (0u64 * SCALE) / new_supplied;
-                utilization_index.set(GLOBAL_KEY, util);
-            }
-        } else if total_borrowed.contains(GLOBAL_KEY) {
-            let prev_borrowed: u64 = total_borrowed.get(GLOBAL_KEY);
-            let new_supplied: u64 = 0u64 + amount;
-            total_supplied.set(GLOBAL_KEY, new_supplied);
-            if new_supplied == 0u64 {
-                utilization_index.set(GLOBAL_KEY, 0u64);
-            } else {
-                let util: u64 = (prev_borrowed * SCALE) / new_supplied;
-                utilization_index.set(GLOBAL_KEY, util);
-            }
-        } else {
-            total_supplied.set(GLOBAL_KEY, amount);
-            utilization_index.set(GLOBAL_KEY, 0u64);
-        }
-    }
+    // 2. ---- Inlined interest accrual (ternary-only, no if re-assignment) ----
+    let last_block:  u64 = Mapping::get_or_use(last_accrual_block,  id, 0u64);
+    let sup_idx:     u64 = Mapping::get_or_use(supply_index,        id, INDEX_SCALE);
+    let bor_idx:     u64 = Mapping::get_or_use(borrow_index,        id, INDEX_SCALE);
+    let deposited:   u64 = Mapping::get_or_use(total_deposited,     id, 0u64);
+    let borrowed:    u64 = Mapping::get_or_use(total_borrowed,      id, 0u64);
+    let fees:        u64 = Mapping::get_or_use(protocol_fees,       id, 0u64);
 
-    async function finalize_repay(amount: u64, user_hash: field, current_block: u64, token_future: Future) {
-        token_future.await();
-        let lub: u64 = Mapping::get_or_use(last_update_block, GLOBAL_KEY, 0u64);
-        if current_block > lub {
-            let delta: u64 = current_block - lub;
-            let effective_delta: u64 = (delta > MAX_ACCRUAL_DELTA) ? MAX_ACCRUAL_DELTA : delta;
-            last_update_block.set(GLOBAL_KEY, lub + effective_delta);
-            let ts: u64 = Mapping::get_or_use(total_supplied, GLOBAL_KEY, 0u64);
-            if ts > 0u64 {
-                let tb: u64 = Mapping::get_or_use(total_borrowed, GLOBAL_KEY, 0u64);
-                let li: u64 = Mapping::get_or_use(liquidity_index, GLOBAL_KEY, INDEX_SCALE);
-                let bi: u64 = Mapping::get_or_use(borrow_index, GLOBAL_KEY, INDEX_SCALE);
-                let util: u64 = (tb * SCALE) / ts;
-                let br: u64 = BASE_RATE_PER_BLOCK + (SLOPE_PER_UTIL * util) / SCALE;
-                let sr: u64 = (br * util * (10000u64 - RESERVE_FACTOR_BPS)) / (SCALE * 10000u64);
-                let li_new: u64 = li + (li * sr * effective_delta) / INDEX_SCALE;
-                let bi_new: u64 = bi + (bi * br * effective_delta) / INDEX_SCALE;
-                liquidity_index.set(GLOBAL_KEY, li_new);
-                borrow_index.set(GLOBAL_KEY, bi_new);
-            }
-        }
-        let bi: u64 = Mapping::get_or_use(borrow_index, GLOBAL_KEY, INDEX_SCALE);
-        let scaled_borrow: u64 = Mapping::get_or_use(user_scaled_borrow, user_hash, 0u64);
-        let real_debt: u64 = (scaled_borrow * bi) / INDEX_SCALE;
-        assert(amount <= real_debt);
+    let raw_delta:   u64 = current_block > last_block ? current_block - last_block : 0u64;
+    let delta:       u64 = raw_delta > MAX_ACCRUAL_DELTA ? MAX_ACCRUAL_DELTA : raw_delta;
+    let do_accrue:  bool = delta > 0u64 && deposited > 0u64;
 
-        let scaled_delta: u64 = (amount * INDEX_SCALE) / bi;
-        Mapping::set(user_scaled_borrow, user_hash, scaled_borrow - scaled_delta);
+    // utilization = borrowed / deposited  (SCALE = 10_000)
+    let util:        u64 = deposited == 0u64 ? 0u64 : (borrowed * SCALE) / deposited;
 
-        let current_repayments: u64 = Mapping::get_or_use(user_total_repayments, user_hash, 0u64);
-        Mapping::set(user_total_repayments, user_hash, current_repayments + amount);
+    // borrow_rate_per_block  = (base + slope*util) * INDEX_SCALE / (BLOCKS_PER_YEAR * SCALE)
+    let borrow_rate: u64 = (BASE_RATE + (SLOPE_RATE * util) / SCALE)
+                           * INDEX_SCALE / (BLOCKS_PER_YEAR * SCALE);
 
-        if total_supplied.contains(GLOBAL_KEY) && total_borrowed.contains(GLOBAL_KEY) {
-            let prev_supplied: u64 = total_supplied.get(GLOBAL_KEY);
-            let prev_borrowed: u64 = total_borrowed.get(GLOBAL_KEY);
-            assert(amount <= prev_borrowed);
-            let new_borrowed: u64 = prev_borrowed - amount;
-            total_borrowed.set(GLOBAL_KEY, new_borrowed);
-            if prev_supplied == 0u64 {
-                utilization_index.set(GLOBAL_KEY, 0u64);
-            } else {
-                let util: u64 = (new_borrowed * SCALE) / prev_supplied;
-                utilization_index.set(GLOBAL_KEY, util);
-            }
-        } else {
-            assert(false);
-        }
-    }
+    // supply_rate_per_block  = borrow_rate * util * (1 - reserve_factor) / SCALE^2
+    let supply_rate: u64 = (borrow_rate * util * (SCALE - RESERVE_FACTOR))
+                           / (SCALE * SCALE);
 
-    async function finalize_withdraw(amount: u64, user_hash: field, current_block: u64) {
-        let lub: u64 = Mapping::get_or_use(last_update_block, GLOBAL_KEY, 0u64);
-        if current_block > lub {
-            let delta: u64 = current_block - lub;
-            let effective_delta: u64 = (delta > MAX_ACCRUAL_DELTA) ? MAX_ACCRUAL_DELTA : delta;
-            last_update_block.set(GLOBAL_KEY, lub + effective_delta);
-            let ts: u64 = Mapping::get_or_use(total_supplied, GLOBAL_KEY, 0u64);
-            if ts > 0u64 {
-                let tb: u64 = Mapping::get_or_use(total_borrowed, GLOBAL_KEY, 0u64);
-                let li: u64 = Mapping::get_or_use(liquidity_index, GLOBAL_KEY, INDEX_SCALE);
-                let bi: u64 = Mapping::get_or_use(borrow_index, GLOBAL_KEY, INDEX_SCALE);
-                let util: u64 = (tb * SCALE) / ts;
-                let br: u64 = BASE_RATE_PER_BLOCK + (SLOPE_PER_UTIL * util) / SCALE;
-                let sr: u64 = (br * util * (10000u64 - RESERVE_FACTOR_BPS)) / (SCALE * 10000u64);
-                let li_new: u64 = li + (li * sr * effective_delta) / INDEX_SCALE;
-                let bi_new: u64 = bi + (bi * br * effective_delta) / INDEX_SCALE;
-                liquidity_index.set(GLOBAL_KEY, li_new);
-                borrow_index.set(GLOBAL_KEY, bi_new);
-            }
-        }
-        let li: u64 = Mapping::get_or_use(liquidity_index, GLOBAL_KEY, INDEX_SCALE);
-        let scaled_supply: u64 = Mapping::get_or_use(user_scaled_supply, user_hash, 0u64);
-        let real_balance: u64 = (scaled_supply * li) / INDEX_SCALE;
-        assert(amount <= real_balance);
+    let new_sup_idx: u64 = do_accrue
+        ? sup_idx + (sup_idx * supply_rate * delta) / INDEX_SCALE
+        : sup_idx;
+    let new_bor_idx: u64 = do_accrue
+        ? bor_idx + (bor_idx * borrow_rate * delta) / INDEX_SCALE
+        : bor_idx;
 
-        let scaled_delta: u64 = (amount * INDEX_SCALE) / li;
-        Mapping::set(user_scaled_supply, user_hash, scaled_supply - scaled_delta);
+    // protocol_fee_delta = borrowed * borrow_rate * delta * reserve_factor / (INDEX_SCALE*SCALE)
+    let fee_delta:   u64 = do_accrue
+        ? (borrowed * borrow_rate * delta * RESERVE_FACTOR) / (INDEX_SCALE * SCALE)
+        : 0u64;
 
-        let current_withdrawals: u64 = Mapping::get_or_use(user_total_withdrawals, user_hash, 0u64);
-        Mapping::set(user_total_withdrawals, user_hash, current_withdrawals + amount);
+    // apy_bps = rate_per_block * BLOCKS_PER_YEAR * SCALE / INDEX_SCALE
+    let new_s_apy:   u64 = (supply_rate * BLOCKS_PER_YEAR * SCALE) / INDEX_SCALE;
+    let new_b_apy:   u64 = (borrow_rate * BLOCKS_PER_YEAR * SCALE) / INDEX_SCALE;
+    let new_block:   u64 = do_accrue ? last_block + delta : last_block;
 
-        if total_supplied.contains(GLOBAL_KEY) && total_borrowed.contains(GLOBAL_KEY) {
-            let prev_supplied: u64 = total_supplied.get(GLOBAL_KEY);
-            let prev_borrowed: u64 = total_borrowed.get(GLOBAL_KEY);
-            assert(prev_supplied >= amount);
-            assert((prev_supplied - amount) >= prev_borrowed);
-            let new_supplied: u64 = prev_supplied - amount;
-            total_supplied.set(GLOBAL_KEY, new_supplied);
-            if new_supplied == 0u64 {
-                utilization_index.set(GLOBAL_KEY, 0u64);
-            } else {
-                let util: u64 = (prev_borrowed * SCALE) / new_supplied;
-                utilization_index.set(GLOBAL_KEY, util);
-            }
-        } else if total_supplied.contains(GLOBAL_KEY) {
-            let prev_supplied: u64 = total_supplied.get(GLOBAL_KEY);
-            assert(prev_supplied >= amount);
-            let new_supplied: u64 = prev_supplied - amount;
-            total_supplied.set(GLOBAL_KEY, new_supplied);
-            if new_supplied == 0u64 {
-                utilization_index.set(GLOBAL_KEY, 0u64);
-            } else {
-                let util: u64 = (0u64 * SCALE) / new_supplied;
-                utilization_index.set(GLOBAL_KEY, util);
-            }
-        } else {
-            assert(false);
-        }
-    }
+    Mapping::set(supply_index,        id, new_sup_idx);
+    Mapping::set(borrow_index,        id, new_bor_idx);
+    Mapping::set(last_accrual_block,  id, new_block);
+    Mapping::set(protocol_fees,       id, fees + fee_delta);
+    Mapping::set(supply_apy,          id, new_s_apy);
+    Mapping::set(borrow_apy,          id, new_b_apy);
+    // ---- End accrual ----
 
-    async function finalize_borrow(amount: u64, user_hash: field, current_block: u64) {
-        let lub: u64 = Mapping::get_or_use(last_update_block, GLOBAL_KEY, 0u64);
-        if current_block > lub {
-            let delta: u64 = current_block - lub;
-            let effective_delta: u64 = (delta > MAX_ACCRUAL_DELTA) ? MAX_ACCRUAL_DELTA : delta;
-            last_update_block.set(GLOBAL_KEY, lub + effective_delta);
-            let ts: u64 = Mapping::get_or_use(total_supplied, GLOBAL_KEY, 0u64);
-            if ts > 0u64 {
-                let tb: u64 = Mapping::get_or_use(total_borrowed, GLOBAL_KEY, 0u64);
-                let li: u64 = Mapping::get_or_use(liquidity_index, GLOBAL_KEY, INDEX_SCALE);
-                let bi: u64 = Mapping::get_or_use(borrow_index, GLOBAL_KEY, INDEX_SCALE);
-                let util: u64 = (tb * SCALE) / ts;
-                let br: u64 = BASE_RATE_PER_BLOCK + (SLOPE_PER_UTIL * util) / SCALE;
-                let sr: u64 = (br * util * (10000u64 - RESERVE_FACTOR_BPS)) / (SCALE * 10000u64);
-                let li_new: u64 = li + (li * sr * effective_delta) / INDEX_SCALE;
-                let bi_new: u64 = bi + (bi * br * effective_delta) / INDEX_SCALE;
-                liquidity_index.set(GLOBAL_KEY, li_new);
-                borrow_index.set(GLOBAL_KEY, bi_new);
-            }
-        }
-        let bi: u64 = Mapping::get_or_use(borrow_index, GLOBAL_KEY, INDEX_SCALE);
-        let scaled_delta: u64 = (amount * INDEX_SCALE) / bi;
-        let prev_scaled: u64 = Mapping::get_or_use(user_scaled_borrow, user_hash, 0u64);
-        Mapping::set(user_scaled_borrow, user_hash, prev_scaled + scaled_delta);
+    // 3. Scale deposit by the updated supply index and credit the user.
+    let scaled_in:    u64 = (amount * INDEX_SCALE) / new_sup_idx;
+    let prev_scaled:  u64 = Mapping::get_or_use(user_scaled_supply, user_key, 0u64);
+    Mapping::set(user_scaled_supply, user_key, prev_scaled + scaled_in);
 
-        let current_borrows: u64 = Mapping::get_or_use(user_total_borrows, user_hash, 0u64);
-        let new_total_borrows: u64 = current_borrows + amount;
-        Mapping::set(user_total_borrows, user_hash, new_total_borrows);
+    // 4. Update pool accounting.
+    Mapping::set(total_deposited,     id, deposited + amount);
+    let prev_avail:   u64 = Mapping::get_or_use(available_liquidity, id, 0u64);
+    Mapping::set(available_liquidity, id, prev_avail + amount);
+}
 
-        if total_supplied.contains(GLOBAL_KEY) && total_borrowed.contains(GLOBAL_KEY) {
-            let prev_supplied: u64 = total_supplied.get(GLOBAL_KEY);
-            let prev_borrowed: u64 = total_borrowed.get(GLOBAL_KEY);
-            assert(prev_borrowed + amount <= prev_supplied);
-            let new_borrowed: u64 = prev_borrowed + amount;
-            total_borrowed.set(GLOBAL_KEY, new_borrowed);
-            if prev_supplied == 0u64 {
-                utilization_index.set(GLOBAL_KEY, 0u64);
-            } else {
-                let util: u64 = (new_borrowed * SCALE) / prev_supplied;
-                utilization_index.set(GLOBAL_KEY, util);
-            }
-        } else if total_supplied.contains(GLOBAL_KEY) {
-            let prev_supplied: u64 = total_supplied.get(GLOBAL_KEY);
-            assert(amount <= prev_supplied);
-            total_borrowed.set(GLOBAL_KEY, amount);
-            if prev_supplied == 0u64 {
-                utilization_index.set(GLOBAL_KEY, 0u64);
-            } else {
-                let util: u64 = (amount * SCALE) / prev_supplied;
-                utilization_index.set(GLOBAL_KEY, util);
-            }
-        } else {
-            assert(false);
-        }
-    }
+// ----------------------------------------------------------------
+// FINALIZE WITHDRAW  (state-only — no f_transfer, no .run())
+// ----------------------------------------------------------------
+final fn finalize_withdraw(
+    amount:        u64,
+    user_key:      field,
+    current_block: u64
+) {
+    let id: field = 0field;
 
-    async function finalize_accrue(current_block: u64) {
-        let lub: u64 = Mapping::get_or_use(last_update_block, GLOBAL_KEY, 0u64);
-        if current_block > lub {
-            let delta: u64 = current_block - lub;
-            let effective_delta: u64 = (delta > MAX_ACCRUAL_DELTA) ? MAX_ACCRUAL_DELTA : delta;
-            last_update_block.set(GLOBAL_KEY, lub + effective_delta);
-            let ts: u64 = Mapping::get_or_use(total_supplied, GLOBAL_KEY, 0u64);
-            if ts > 0u64 {
-                let tb: u64 = Mapping::get_or_use(total_borrowed, GLOBAL_KEY, 0u64);
-                let li: u64 = Mapping::get_or_use(liquidity_index, GLOBAL_KEY, INDEX_SCALE);
-                let bi: u64 = Mapping::get_or_use(borrow_index, GLOBAL_KEY, INDEX_SCALE);
-                let util: u64 = (tb * SCALE) / ts;
-                let br: u64 = BASE_RATE_PER_BLOCK + (SLOPE_PER_UTIL * util) / SCALE;
-                let sr: u64 = (br * util * (10000u64 - RESERVE_FACTOR_BPS)) / (SCALE * 10000u64);
-                let li_new: u64 = li + (li * sr * effective_delta) / INDEX_SCALE;
-                let bi_new: u64 = bi + (bi * br * effective_delta) / INDEX_SCALE;
-                liquidity_index.set(GLOBAL_KEY, li_new);
-                borrow_index.set(GLOBAL_KEY, bi_new);
-            }
-        }
-    }
+    // 1. ---- Inlined interest accrual ----
+    let last_block:  u64 = Mapping::get_or_use(last_accrual_block,  id, 0u64);
+    let sup_idx:     u64 = Mapping::get_or_use(supply_index,        id, INDEX_SCALE);
+    let bor_idx:     u64 = Mapping::get_or_use(borrow_index,        id, INDEX_SCALE);
+    let deposited:   u64 = Mapping::get_or_use(total_deposited,     id, 0u64);
+    let borrowed:    u64 = Mapping::get_or_use(total_borrowed,      id, 0u64);
+    let fees:        u64 = Mapping::get_or_use(protocol_fees,       id, 0u64);
 
-    async function finalize_get_user_activity(user_hash: field) {
-        let total_deposits: u64 = Mapping::get_or_use(user_total_deposits, user_hash, 0u64);
-        let total_withdrawals: u64 = Mapping::get_or_use(user_total_withdrawals, user_hash, 0u64);
-        let total_borrows: u64 = Mapping::get_or_use(user_total_borrows, user_hash, 0u64);
-        let total_repayments: u64 = Mapping::get_or_use(user_total_repayments, user_hash, 0u64);
-    }
+    let raw_delta:   u64 = current_block > last_block ? current_block - last_block : 0u64;
+    let delta:       u64 = raw_delta > MAX_ACCRUAL_DELTA ? MAX_ACCRUAL_DELTA : raw_delta;
+    let do_accrue:  bool = delta > 0u64 && deposited > 0u64;
+
+    let util:        u64 = deposited == 0u64 ? 0u64 : (borrowed * SCALE) / deposited;
+    let borrow_rate: u64 = (BASE_RATE + (SLOPE_RATE * util) / SCALE)
+                           * INDEX_SCALE / (BLOCKS_PER_YEAR * SCALE);
+    let supply_rate: u64 = (borrow_rate * util * (SCALE - RESERVE_FACTOR))
+                           / (SCALE * SCALE);
+
+    let new_sup_idx: u64 = do_accrue
+        ? sup_idx + (sup_idx * supply_rate * delta) / INDEX_SCALE
+        : sup_idx;
+    let new_bor_idx: u64 = do_accrue
+        ? bor_idx + (bor_idx * borrow_rate * delta) / INDEX_SCALE
+        : bor_idx;
+    let fee_delta:   u64 = do_accrue
+        ? (borrowed * borrow_rate * delta * RESERVE_FACTOR) / (INDEX_SCALE * SCALE)
+        : 0u64;
+    let new_s_apy:   u64 = (supply_rate * BLOCKS_PER_YEAR * SCALE) / INDEX_SCALE;
+    let new_b_apy:   u64 = (borrow_rate * BLOCKS_PER_YEAR * SCALE) / INDEX_SCALE;
+    let new_block:   u64 = do_accrue ? last_block + delta : last_block;
+
+    Mapping::set(supply_index,        id, new_sup_idx);
+    Mapping::set(borrow_index,        id, new_bor_idx);
+    Mapping::set(last_accrual_block,  id, new_block);
+    Mapping::set(protocol_fees,       id, fees + fee_delta);
+    Mapping::set(supply_apy,          id, new_s_apy);
+    Mapping::set(borrow_apy,          id, new_b_apy);
+    // ---- End accrual ----
+
+    // 2. Balance check.
+    let scaled_sup:   u64 = Mapping::get_or_use(user_scaled_supply, user_key, 0u64);
+    let real_balance: u64 = (scaled_sup * new_sup_idx) / INDEX_SCALE;
+    assert(amount <= real_balance);
+
+    // 3. Collateral safety: remaining collateral must still cover open debt.
+    let scaled_bor:   u64 = Mapping::get_or_use(user_scaled_borrow, user_key, 0u64);
+    let real_debt:    u64 = (scaled_bor * new_bor_idx) / INDEX_SCALE;
+    let remaining:    u64 = real_balance - amount;
+    let max_debt:     u64 = (remaining * LTV_FACTOR) / SCALE;
+    assert(real_debt == 0u64 || real_debt <= max_debt);
+
+    // 4. Debit user's scaled supply.
+    let scaled_out:   u64 = (amount * INDEX_SCALE) / new_sup_idx;
+    let new_scaled:   u64 = scaled_sup > scaled_out ? scaled_sup - scaled_out : 0u64;
+    Mapping::set(user_scaled_supply, user_key, new_scaled);
+
+    // 5. Update pool accounting.
+    let new_deposited: u64 = deposited > amount ? deposited - amount : 0u64;
+    Mapping::set(total_deposited,     id, new_deposited);
+    let prev_avail:    u64 = Mapping::get_or_use(available_liquidity, id, 0u64);
+    let new_avail:     u64 = prev_avail > amount ? prev_avail - amount : 0u64;
+    Mapping::set(available_liquidity, id, new_avail);
+}
+
+// ----------------------------------------------------------------
+// FINALIZE BORROW  (state-only — no f_transfer, no .run())
+// ----------------------------------------------------------------
+final fn finalize_borrow(
+    amount:        u64,
+    user_key:      field,
+    current_block: u64
+) {
+    let id: field = 0field;
+
+    // 1. ---- Inlined interest accrual ----
+    let last_block:  u64 = Mapping::get_or_use(last_accrual_block,  id, 0u64);
+    let sup_idx:     u64 = Mapping::get_or_use(supply_index,        id, INDEX_SCALE);
+    let bor_idx:     u64 = Mapping::get_or_use(borrow_index,        id, INDEX_SCALE);
+    let deposited:   u64 = Mapping::get_or_use(total_deposited,     id, 0u64);
+    let borrowed:    u64 = Mapping::get_or_use(total_borrowed,      id, 0u64);
+    let fees:        u64 = Mapping::get_or_use(protocol_fees,       id, 0u64);
+
+    let raw_delta:   u64 = current_block > last_block ? current_block - last_block : 0u64;
+    let delta:       u64 = raw_delta > MAX_ACCRUAL_DELTA ? MAX_ACCRUAL_DELTA : raw_delta;
+    let do_accrue:  bool = delta > 0u64 && deposited > 0u64;
+
+    let util:        u64 = deposited == 0u64 ? 0u64 : (borrowed * SCALE) / deposited;
+    let borrow_rate: u64 = (BASE_RATE + (SLOPE_RATE * util) / SCALE)
+                           * INDEX_SCALE / (BLOCKS_PER_YEAR * SCALE);
+    let supply_rate: u64 = (borrow_rate * util * (SCALE - RESERVE_FACTOR))
+                           / (SCALE * SCALE);
+
+    let new_sup_idx: u64 = do_accrue
+        ? sup_idx + (sup_idx * supply_rate * delta) / INDEX_SCALE
+        : sup_idx;
+    let new_bor_idx: u64 = do_accrue
+        ? bor_idx + (bor_idx * borrow_rate * delta) / INDEX_SCALE
+        : bor_idx;
+    let fee_delta:   u64 = do_accrue
+        ? (borrowed * borrow_rate * delta * RESERVE_FACTOR) / (INDEX_SCALE * SCALE)
+        : 0u64;
+    let new_s_apy:   u64 = (supply_rate * BLOCKS_PER_YEAR * SCALE) / INDEX_SCALE;
+    let new_b_apy:   u64 = (borrow_rate * BLOCKS_PER_YEAR * SCALE) / INDEX_SCALE;
+    let new_block:   u64 = do_accrue ? last_block + delta : last_block;
+
+    Mapping::set(supply_index,        id, new_sup_idx);
+    Mapping::set(borrow_index,        id, new_bor_idx);
+    Mapping::set(last_accrual_block,  id, new_block);
+    Mapping::set(protocol_fees,       id, fees + fee_delta);
+    Mapping::set(supply_apy,          id, new_s_apy);
+    Mapping::set(borrow_apy,          id, new_b_apy);
+    // ---- End accrual ----
+
+    // 2. LTV check: (existing_debt + new_borrow) <= 75% of collateral.
+    let scaled_sup:       u64 = Mapping::get_or_use(user_scaled_supply, user_key, 0u64);
+    let collateral_value: u64 = (scaled_sup * new_sup_idx) / INDEX_SCALE;
+    let max_borrow:       u64 = (collateral_value * LTV_FACTOR) / SCALE;
+    let scaled_bor:       u64 = Mapping::get_or_use(user_scaled_borrow, user_key, 0u64);
+    let existing_debt:    u64 = (scaled_bor * new_bor_idx) / INDEX_SCALE;
+    assert(existing_debt + amount <= max_borrow);
+
+    // 3. Pool liquidity check.
+    let avail:            u64 = Mapping::get_or_use(available_liquidity, id, 0u64);
+    assert(amount <= avail);
+
+    // 4. Record scaled borrow.
+    let scaled_in:        u64 = (amount * INDEX_SCALE) / new_bor_idx;
+    Mapping::set(user_scaled_borrow, user_key, scaled_bor + scaled_in);
+
+    // 5. Update pool accounting.
+    Mapping::set(total_borrowed,      id, borrowed + amount);
+    let new_avail:        u64 = avail > amount ? avail - amount : 0u64;
+    Mapping::set(available_liquidity, id, new_avail);
+}
+
+// ----------------------------------------------------------------
+// FINALIZE REPAY
+// ----------------------------------------------------------------
+final fn finalize_repay(
+    f_transfer:    Final,
+    amount:        u64,
+    user_key:      field,
+    current_block: u64
+) {
+    // 1. Confirm vault received the repaid funds.
+    f_transfer.run();
+
+    let id: field = 0field;
+
+    // 2. ---- Inlined interest accrual ----
+    let last_block:  u64 = Mapping::get_or_use(last_accrual_block,  id, 0u64);
+    let sup_idx:     u64 = Mapping::get_or_use(supply_index,        id, INDEX_SCALE);
+    let bor_idx:     u64 = Mapping::get_or_use(borrow_index,        id, INDEX_SCALE);
+    let deposited:   u64 = Mapping::get_or_use(total_deposited,     id, 0u64);
+    let borrowed:    u64 = Mapping::get_or_use(total_borrowed,      id, 0u64);
+    let fees:        u64 = Mapping::get_or_use(protocol_fees,       id, 0u64);
+
+    let raw_delta:   u64 = current_block > last_block ? current_block - last_block : 0u64;
+    let delta:       u64 = raw_delta > MAX_ACCRUAL_DELTA ? MAX_ACCRUAL_DELTA : raw_delta;
+    let do_accrue:  bool = delta > 0u64 && deposited > 0u64;
+
+    let util:        u64 = deposited == 0u64 ? 0u64 : (borrowed * SCALE) / deposited;
+    let borrow_rate: u64 = (BASE_RATE + (SLOPE_RATE * util) / SCALE)
+                           * INDEX_SCALE / (BLOCKS_PER_YEAR * SCALE);
+    let supply_rate: u64 = (borrow_rate * util * (SCALE - RESERVE_FACTOR))
+                           / (SCALE * SCALE);
+
+    let new_sup_idx: u64 = do_accrue
+        ? sup_idx + (sup_idx * supply_rate * delta) / INDEX_SCALE
+        : sup_idx;
+    let new_bor_idx: u64 = do_accrue
+        ? bor_idx + (bor_idx * borrow_rate * delta) / INDEX_SCALE
+        : bor_idx;
+    let fee_delta:   u64 = do_accrue
+        ? (borrowed * borrow_rate * delta * RESERVE_FACTOR) / (INDEX_SCALE * SCALE)
+        : 0u64;
+    let new_s_apy:   u64 = (supply_rate * BLOCKS_PER_YEAR * SCALE) / INDEX_SCALE;
+    let new_b_apy:   u64 = (borrow_rate * BLOCKS_PER_YEAR * SCALE) / INDEX_SCALE;
+    let new_block:   u64 = do_accrue ? last_block + delta : last_block;
+
+    Mapping::set(supply_index,        id, new_sup_idx);
+    Mapping::set(borrow_index,        id, new_bor_idx);
+    Mapping::set(last_accrual_block,  id, new_block);
+    Mapping::set(protocol_fees,       id, fees + fee_delta);
+    Mapping::set(supply_apy,          id, new_s_apy);
+    Mapping::set(borrow_apy,          id, new_b_apy);
+    // ---- End accrual ----
+
+    // 3. Revert if repayment exceeds actual outstanding debt.
+    let scaled_bor:   u64 = Mapping::get_or_use(user_scaled_borrow, user_key, 0u64);
+    let real_debt:    u64 = (scaled_bor * new_bor_idx) / INDEX_SCALE;
+    assert(amount <= real_debt);
+    let repay_amt:    u64 = amount;
+
+    // 4. Reduce user's scaled borrow position.
+    let scaled_out:   u64 = (repay_amt * INDEX_SCALE) / new_bor_idx;
+    let new_scaled:   u64 = scaled_bor > scaled_out ? scaled_bor - scaled_out : 0u64;
+    Mapping::set(user_scaled_borrow, user_key, new_scaled);
+
+    // 5. Update pool accounting.
+    let new_borrowed: u64 = borrowed > repay_amt ? borrowed - repay_amt : 0u64;
+    Mapping::set(total_borrowed,      id, new_borrowed);
+    let prev_avail:   u64 = Mapping::get_or_use(available_liquidity, id, 0u64);
+    Mapping::set(available_liquidity, id, prev_avail + repay_amt);
+}
+
+// ----------------------------------------------------------------
+// FINALIZE ACCRUE — standalone index sync, no user state changes.
+// ----------------------------------------------------------------
+final fn finalize_accrue(current_block: u64) {
+    let id: field = 0field;
+
+    // ---- Inlined interest accrual ----
+    let last_block:  u64 = Mapping::get_or_use(last_accrual_block,  id, 0u64);
+    let sup_idx:     u64 = Mapping::get_or_use(supply_index,        id, INDEX_SCALE);
+    let bor_idx:     u64 = Mapping::get_or_use(borrow_index,        id, INDEX_SCALE);
+    let deposited:   u64 = Mapping::get_or_use(total_deposited,     id, 0u64);
+    let borrowed:    u64 = Mapping::get_or_use(total_borrowed,      id, 0u64);
+    let fees:        u64 = Mapping::get_or_use(protocol_fees,       id, 0u64);
+
+    let raw_delta:   u64 = current_block > last_block ? current_block - last_block : 0u64;
+    let delta:       u64 = raw_delta > MAX_ACCRUAL_DELTA ? MAX_ACCRUAL_DELTA : raw_delta;
+    let do_accrue:  bool = delta > 0u64 && deposited > 0u64;
+
+    let util:        u64 = deposited == 0u64 ? 0u64 : (borrowed * SCALE) / deposited;
+    let borrow_rate: u64 = (BASE_RATE + (SLOPE_RATE * util) / SCALE)
+                           * INDEX_SCALE / (BLOCKS_PER_YEAR * SCALE);
+    let supply_rate: u64 = (borrow_rate * util * (SCALE - RESERVE_FACTOR))
+                           / (SCALE * SCALE);
+
+    let new_sup_idx: u64 = do_accrue
+        ? sup_idx + (sup_idx * supply_rate * delta) / INDEX_SCALE
+        : sup_idx;
+    let new_bor_idx: u64 = do_accrue
+        ? bor_idx + (bor_idx * borrow_rate * delta) / INDEX_SCALE
+        : bor_idx;
+    let fee_delta:   u64 = do_accrue
+        ? (borrowed * borrow_rate * delta * RESERVE_FACTOR) / (INDEX_SCALE * SCALE)
+        : 0u64;
+    let new_s_apy:   u64 = (supply_rate * BLOCKS_PER_YEAR * SCALE) / INDEX_SCALE;
+    let new_b_apy:   u64 = (borrow_rate * BLOCKS_PER_YEAR * SCALE) / INDEX_SCALE;
+    let new_block:   u64 = do_accrue ? last_block + delta : last_block;
+
+    Mapping::set(supply_index,        id, new_sup_idx);
+    Mapping::set(borrow_index,        id, new_bor_idx);
+    Mapping::set(last_accrual_block,  id, new_block);
+    Mapping::set(protocol_fees,       id, fees + fee_delta);
+    Mapping::set(supply_apy,          id, new_s_apy);
+    Mapping::set(borrow_apy,          id, new_b_apy);
+    // ---- End accrual ----
+}
+
+// ----------------------------------------------------------------
+// FINALIZE WITHDRAW FEES  (state-only — no f_transfer, no .run())
+// ----------------------------------------------------------------
+final fn finalize_withdraw_fees(
+    amount: u64,
+    caller: address
+) {
+    assert(caller == aleo1v0ufeajsjwr3lnyq8qay54x3sg7e4ld0287hdt72glr3lhjmn5zqzwnexq);
+    let id: field = 0field;
+    let fees: u64 = Mapping::get_or_use(protocol_fees, id, 0u64);
+    assert(amount <= fees);
+    Mapping::set(protocol_fees, id, fees - amount);
 }

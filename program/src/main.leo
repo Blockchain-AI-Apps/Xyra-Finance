@@ -28,7 +28,7 @@
 
 import credits.aleo;
 
-program lending_pool_v_final.aleo {
+program lending_pool_v2.aleo {
 
     // ================================================================
     // CONSTANTS
