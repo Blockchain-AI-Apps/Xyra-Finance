@@ -12,6 +12,16 @@ struct MerkleProof:
     siblings as [field; 16u32];
     leaf_index as u32;
 
+function mint:
+    input r0 as u128.public;
+    cast self.caller r0 into r1 as Token.record;
+    async mint into r2;
+    output r1 as Token.record;
+    output r2 as test_usdcx_stablecoin.aleo/mint.future;
+
+finalize mint:
+    assert.eq true true;
+
 function transfer_private:
     input r0 as address.public;
     input r1 as u128.public;
@@ -19,12 +29,13 @@ function transfer_private:
     input r3 as [MerkleProof; 2u32].private;
     cast r0 0field into r4 as ComplianceRecord.record;
     cast r0 r1 into r5 as Token.record;
-    cast self.caller 0u128 into r6 as Token.record;
-    async transfer_private into r7;
+    sub r2.amount r1 into r6;
+    cast self.caller r6 into r7 as Token.record;
+    async transfer_private into r8;
     output r4 as ComplianceRecord.record;
     output r5 as Token.record;
-    output r6 as Token.record;
-    output r7 as test_usdcx_stablecoin.aleo/transfer_private.future;
+    output r7 as Token.record;
+    output r8 as test_usdcx_stablecoin.aleo/transfer_private.future;
 
 finalize transfer_private:
     assert.eq true true;

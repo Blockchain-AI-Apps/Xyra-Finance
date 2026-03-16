@@ -127,12 +127,12 @@ program lending_pool_v2.aleo {
     // Call initialize() once after deployment to seed mapping values.
     // ================================================================
 
-    @admin(address = "aleo1v0ufeajsjwr3lnyq8qay54x3sg7e4ld0287hdt72glr3lhjmn5zqzwnexq")
-    constructor() {}
+    // @admin constructor removed for devnet testing (snarkOS version incompatibility)
+    // The initialize() function still enforces admin-only access via assert.
 
     /// One-time initialisation — must be called by the admin after deploy.
     fn initialize() -> Final {
-        assert(self.caller == aleo1v0ufeajsjwr3lnyq8qay54x3sg7e4ld0287hdt72glr3lhjmn5zqzwnexq);
+        assert(self.caller == aleo1rhgdu77hgyqd3xjj8ucu3jj9r2krwz6mnzyd80gncr5fxcwlh5rsvzp9px);
         return final { finalize_initialize(); };
     }
 
@@ -145,8 +145,7 @@ program lending_pool_v2.aleo {
     // ----------------------------------------------------------------
     fn deposit_with_credits(
         pay_record:           credits.aleo/credits,
-        public amount:        u64,
-        public current_block: u64
+        public amount:        u64
     ) -> (UserActivity, credits.aleo/credits, Final) {
         assert(amount > 0u64);
         let caller: address = self.caller;
@@ -166,15 +165,14 @@ program lending_pool_v2.aleo {
             total_repayments:  0u64,
         };
 
-        return (receipt, change, final { finalize_deposit(f_transfer, amount, user_key, current_block); });
+        return (receipt, change, final { finalize_deposit(f_transfer, amount, user_key); });
     }
 
     // ----------------------------------------------------------------
     // 2) WITHDRAW — pool vault sends public credits back to caller.
     // ----------------------------------------------------------------
     fn withdraw(
-        public amount:        u64,
-        public current_block: u64
+        public amount:        u64
     ) -> (UserActivity, Final) {
         assert(amount > 0u64);
         let caller: address = self.caller;
@@ -191,15 +189,14 @@ program lending_pool_v2.aleo {
             total_repayments:  0u64,
         };
 
-        return (receipt, final { finalize_withdraw(f_transfer, amount, user_key, current_block); });
+        return (receipt, final { finalize_withdraw(f_transfer, amount, user_key); });
     }
 
     // ----------------------------------------------------------------
     // 3) BORROW — pool vault sends public credits to caller.
     // ----------------------------------------------------------------
     fn borrow(
-        public amount:        u64,
-        public current_block: u64
+        public amount:        u64
     ) -> (UserActivity, Final) {
         assert(amount > 0u64);
         let caller: address = self.caller;
@@ -216,7 +213,7 @@ program lending_pool_v2.aleo {
             total_repayments:  0u64,
         };
 
-        return (receipt, final { finalize_borrow(f_transfer, amount, user_key, current_block); });
+        return (receipt, final { finalize_borrow(f_transfer, amount, user_key); });
     }
 
     // ----------------------------------------------------------------
@@ -224,8 +221,7 @@ program lending_pool_v2.aleo {
     // ----------------------------------------------------------------
     fn repay_with_credits(
         pay_record:           credits.aleo/credits,
-        public amount:        u64,
-        public current_block: u64
+        public amount:        u64
     ) -> (UserActivity, credits.aleo/credits, Final) {
         assert(amount > 0u64);
         let caller: address = self.caller;
@@ -245,15 +241,15 @@ program lending_pool_v2.aleo {
             total_repayments:  amount,
         };
 
-        return (receipt, change, final { finalize_repay(f_transfer, amount, user_key, current_block); });
+        return (receipt, change, final { finalize_repay(f_transfer, amount, user_key); });
     }
 
     // ----------------------------------------------------------------
     // 5) ACCRUE INTEREST — permissionless; syncs indices without a
     //    deposit/withdraw/borrow/repay. Useful for keepers / UIs.
     // ----------------------------------------------------------------
-    fn accrue_interest(public current_block: u64) -> Final {
-        return final { finalize_accrue(current_block); };
+    fn accrue_interest() -> Final {
+        return final { finalize_accrue(); };
     }
 
     // ----------------------------------------------------------------
@@ -304,8 +300,7 @@ final fn finalize_initialize() {
 final fn finalize_deposit(
     f_transfer:    Final,
     amount:        u64,
-    user_key:      field,
-    current_block: u64
+    user_key:      field
 ) {
     // 1. Confirm vault received the funds.
     f_transfer.run();
@@ -313,6 +308,8 @@ final fn finalize_deposit(
     let id: field = 0field;
 
     // 2. ---- Inlined interest accrual (ternary-only, no if re-assignment) ----
+    // Use on-chain block.height (u32) — never trust caller-supplied block numbers.
+    let current_block: u64 = (block.height as u64);
     let last_block:  u64 = Mapping::get_or_use(last_accrual_block,  id, 0u64);
     let sup_idx:     u64 = Mapping::get_or_use(supply_index,        id, INDEX_SCALE);
     let bor_idx:     u64 = Mapping::get_or_use(borrow_index,        id, INDEX_SCALE);
@@ -325,7 +322,10 @@ final fn finalize_deposit(
     let do_accrue:  bool = delta > 0u64 && deposited > 0u64;
 
     // utilization = borrowed / deposited  (SCALE = 10_000)
-    let util:        u64 = deposited == 0u64 ? 0u64 : (borrowed * SCALE) / deposited;
+    // NOTE: Leo evaluates both ternary branches, so we must avoid dividing by zero.
+    let safe_deposited: u64 = deposited == 0u64 ? 1u64 : deposited;
+    let raw_util:    u64 = (borrowed * SCALE) / safe_deposited;
+    let util:        u64 = deposited == 0u64 ? 0u64 : raw_util;
 
     // borrow_rate_per_block  = (base + slope*util) * INDEX_SCALE / (BLOCKS_PER_YEAR * SCALE)
     let borrow_rate: u64 = (BASE_RATE + (SLOPE_RATE * util) / SCALE)
@@ -342,15 +342,19 @@ final fn finalize_deposit(
         ? bor_idx + (bor_idx * borrow_rate * delta) / INDEX_SCALE
         : bor_idx;
 
-    // protocol_fee_delta = borrowed * borrow_rate * delta * reserve_factor / (INDEX_SCALE*SCALE)
+    // protocol_fee_delta: restructured to divide earlier to prevent u64 overflow
+    // Original: (borrowed * borrow_rate * delta * RESERVE_FACTOR) / (INDEX_SCALE * SCALE)
+    // Split:    ((borrowed * borrow_rate) / INDEX_SCALE) * (delta * RESERVE_FACTOR) / SCALE
+    let fee_rate:    u64 = (borrowed * borrow_rate) / INDEX_SCALE;
     let fee_delta:   u64 = do_accrue
-        ? (borrowed * borrow_rate * delta * RESERVE_FACTOR) / (INDEX_SCALE * SCALE)
+        ? (fee_rate * delta * RESERVE_FACTOR) / SCALE
         : 0u64;
 
     // apy_bps = rate_per_block * BLOCKS_PER_YEAR * SCALE / INDEX_SCALE
     let new_s_apy:   u64 = (supply_rate * BLOCKS_PER_YEAR * SCALE) / INDEX_SCALE;
     let new_b_apy:   u64 = (borrow_rate * BLOCKS_PER_YEAR * SCALE) / INDEX_SCALE;
-    let new_block:   u64 = do_accrue ? last_block + delta : last_block;
+    // Always advance block marker when delta > 0, even if pool is empty (no accrual needed).
+    let new_block:   u64 = delta > 0u64 ? last_block + delta : last_block;
 
     Mapping::set(supply_index,        id, new_sup_idx);
     Mapping::set(borrow_index,        id, new_bor_idx);
@@ -377,8 +381,7 @@ final fn finalize_deposit(
 final fn finalize_withdraw(
     f_transfer:    Final,
     amount:        u64,
-    user_key:      field,
-    current_block: u64
+    user_key:      field
 ) {
     // 1. Run transfer. Tx reverts atomically if any assert below fails.
     f_transfer.run();
@@ -386,6 +389,7 @@ final fn finalize_withdraw(
     let id: field = 0field;
 
     // 2. ---- Inlined interest accrual ----
+    let current_block: u64 = (block.height as u64);
     let last_block:  u64 = Mapping::get_or_use(last_accrual_block,  id, 0u64);
     let sup_idx:     u64 = Mapping::get_or_use(supply_index,        id, INDEX_SCALE);
     let bor_idx:     u64 = Mapping::get_or_use(borrow_index,        id, INDEX_SCALE);
@@ -397,7 +401,11 @@ final fn finalize_withdraw(
     let delta:       u64 = raw_delta > MAX_ACCRUAL_DELTA ? MAX_ACCRUAL_DELTA : raw_delta;
     let do_accrue:  bool = delta > 0u64 && deposited > 0u64;
 
-    let util:        u64 = deposited == 0u64 ? 0u64 : (borrowed * SCALE) / deposited;
+    // NOTE: Leo evaluates both ternary branches, so we must avoid dividing by zero.
+    let safe_deposited: u64 = deposited == 0u64 ? 1u64 : deposited;
+    let raw_util:    u64 = (borrowed * SCALE) / safe_deposited;
+    let util:        u64 = deposited == 0u64 ? 0u64 : raw_util;
+
     let borrow_rate: u64 = (BASE_RATE + (SLOPE_RATE * util) / SCALE)
                            * INDEX_SCALE / (BLOCKS_PER_YEAR * SCALE);
     let supply_rate: u64 = (borrow_rate * util * (SCALE - RESERVE_FACTOR))
@@ -409,12 +417,14 @@ final fn finalize_withdraw(
     let new_bor_idx: u64 = do_accrue
         ? bor_idx + (bor_idx * borrow_rate * delta) / INDEX_SCALE
         : bor_idx;
+    let fee_rate:    u64 = (borrowed * borrow_rate) / INDEX_SCALE;
     let fee_delta:   u64 = do_accrue
-        ? (borrowed * borrow_rate * delta * RESERVE_FACTOR) / (INDEX_SCALE * SCALE)
+        ? (fee_rate * delta * RESERVE_FACTOR) / SCALE
         : 0u64;
     let new_s_apy:   u64 = (supply_rate * BLOCKS_PER_YEAR * SCALE) / INDEX_SCALE;
     let new_b_apy:   u64 = (borrow_rate * BLOCKS_PER_YEAR * SCALE) / INDEX_SCALE;
-    let new_block:   u64 = do_accrue ? last_block + delta : last_block;
+    // Always advance block marker when delta > 0, even if pool is empty (no accrual needed).
+    let new_block:   u64 = delta > 0u64 ? last_block + delta : last_block;
 
     Mapping::set(supply_index,        id, new_sup_idx);
     Mapping::set(borrow_index,        id, new_bor_idx);
@@ -455,8 +465,7 @@ final fn finalize_withdraw(
 final fn finalize_borrow(
     f_transfer:    Final,
     amount:        u64,
-    user_key:      field,
-    current_block: u64
+    user_key:      field
 ) {
     // 1. Run transfer. Reverts atomically if LTV/liquidity asserts fail.
     f_transfer.run();
@@ -464,6 +473,7 @@ final fn finalize_borrow(
     let id: field = 0field;
 
     // 2. ---- Inlined interest accrual ----
+    let current_block: u64 = (block.height as u64);
     let last_block:  u64 = Mapping::get_or_use(last_accrual_block,  id, 0u64);
     let sup_idx:     u64 = Mapping::get_or_use(supply_index,        id, INDEX_SCALE);
     let bor_idx:     u64 = Mapping::get_or_use(borrow_index,        id, INDEX_SCALE);
@@ -475,7 +485,11 @@ final fn finalize_borrow(
     let delta:       u64 = raw_delta > MAX_ACCRUAL_DELTA ? MAX_ACCRUAL_DELTA : raw_delta;
     let do_accrue:  bool = delta > 0u64 && deposited > 0u64;
 
-    let util:        u64 = deposited == 0u64 ? 0u64 : (borrowed * SCALE) / deposited;
+    // NOTE: Leo evaluates both ternary branches, so we must avoid dividing by zero.
+    let safe_deposited: u64 = deposited == 0u64 ? 1u64 : deposited;
+    let raw_util:    u64 = (borrowed * SCALE) / safe_deposited;
+    let util:        u64 = deposited == 0u64 ? 0u64 : raw_util;
+
     let borrow_rate: u64 = (BASE_RATE + (SLOPE_RATE * util) / SCALE)
                            * INDEX_SCALE / (BLOCKS_PER_YEAR * SCALE);
     let supply_rate: u64 = (borrow_rate * util * (SCALE - RESERVE_FACTOR))
@@ -487,12 +501,14 @@ final fn finalize_borrow(
     let new_bor_idx: u64 = do_accrue
         ? bor_idx + (bor_idx * borrow_rate * delta) / INDEX_SCALE
         : bor_idx;
+    let fee_rate:    u64 = (borrowed * borrow_rate) / INDEX_SCALE;
     let fee_delta:   u64 = do_accrue
-        ? (borrowed * borrow_rate * delta * RESERVE_FACTOR) / (INDEX_SCALE * SCALE)
+        ? (fee_rate * delta * RESERVE_FACTOR) / SCALE
         : 0u64;
     let new_s_apy:   u64 = (supply_rate * BLOCKS_PER_YEAR * SCALE) / INDEX_SCALE;
     let new_b_apy:   u64 = (borrow_rate * BLOCKS_PER_YEAR * SCALE) / INDEX_SCALE;
-    let new_block:   u64 = do_accrue ? last_block + delta : last_block;
+    // Always advance block marker when delta > 0, even if pool is empty (no accrual needed).
+    let new_block:   u64 = delta > 0u64 ? last_block + delta : last_block;
 
     Mapping::set(supply_index,        id, new_sup_idx);
     Mapping::set(borrow_index,        id, new_bor_idx);
@@ -530,8 +546,7 @@ final fn finalize_borrow(
 final fn finalize_repay(
     f_transfer:    Final,
     amount:        u64,
-    user_key:      field,
-    current_block: u64
+    user_key:      field
 ) {
     // 1. Confirm vault received the repaid funds.
     f_transfer.run();
@@ -539,6 +554,7 @@ final fn finalize_repay(
     let id: field = 0field;
 
     // 2. ---- Inlined interest accrual ----
+    let current_block: u64 = (block.height as u64);
     let last_block:  u64 = Mapping::get_or_use(last_accrual_block,  id, 0u64);
     let sup_idx:     u64 = Mapping::get_or_use(supply_index,        id, INDEX_SCALE);
     let bor_idx:     u64 = Mapping::get_or_use(borrow_index,        id, INDEX_SCALE);
@@ -550,7 +566,11 @@ final fn finalize_repay(
     let delta:       u64 = raw_delta > MAX_ACCRUAL_DELTA ? MAX_ACCRUAL_DELTA : raw_delta;
     let do_accrue:  bool = delta > 0u64 && deposited > 0u64;
 
-    let util:        u64 = deposited == 0u64 ? 0u64 : (borrowed * SCALE) / deposited;
+    // NOTE: Leo evaluates both ternary branches, so we must avoid dividing by zero.
+    let safe_deposited: u64 = deposited == 0u64 ? 1u64 : deposited;
+    let raw_util:    u64 = (borrowed * SCALE) / safe_deposited;
+    let util:        u64 = deposited == 0u64 ? 0u64 : raw_util;
+
     let borrow_rate: u64 = (BASE_RATE + (SLOPE_RATE * util) / SCALE)
                            * INDEX_SCALE / (BLOCKS_PER_YEAR * SCALE);
     let supply_rate: u64 = (borrow_rate * util * (SCALE - RESERVE_FACTOR))
@@ -562,12 +582,14 @@ final fn finalize_repay(
     let new_bor_idx: u64 = do_accrue
         ? bor_idx + (bor_idx * borrow_rate * delta) / INDEX_SCALE
         : bor_idx;
+    let fee_rate:    u64 = (borrowed * borrow_rate) / INDEX_SCALE;
     let fee_delta:   u64 = do_accrue
-        ? (borrowed * borrow_rate * delta * RESERVE_FACTOR) / (INDEX_SCALE * SCALE)
+        ? (fee_rate * delta * RESERVE_FACTOR) / SCALE
         : 0u64;
     let new_s_apy:   u64 = (supply_rate * BLOCKS_PER_YEAR * SCALE) / INDEX_SCALE;
     let new_b_apy:   u64 = (borrow_rate * BLOCKS_PER_YEAR * SCALE) / INDEX_SCALE;
-    let new_block:   u64 = do_accrue ? last_block + delta : last_block;
+    // Always advance block marker when delta > 0, even if pool is empty (no accrual needed).
+    let new_block:   u64 = delta > 0u64 ? last_block + delta : last_block;
 
     Mapping::set(supply_index,        id, new_sup_idx);
     Mapping::set(borrow_index,        id, new_bor_idx);
@@ -598,10 +620,11 @@ final fn finalize_repay(
 // ----------------------------------------------------------------
 // FINALIZE ACCRUE — standalone index sync, no user state changes.
 // ----------------------------------------------------------------
-final fn finalize_accrue(current_block: u64) {
+final fn finalize_accrue() {
     let id: field = 0field;
 
     // ---- Inlined interest accrual ----
+    let current_block: u64 = (block.height as u64);
     let last_block:  u64 = Mapping::get_or_use(last_accrual_block,  id, 0u64);
     let sup_idx:     u64 = Mapping::get_or_use(supply_index,        id, INDEX_SCALE);
     let bor_idx:     u64 = Mapping::get_or_use(borrow_index,        id, INDEX_SCALE);
@@ -613,7 +636,11 @@ final fn finalize_accrue(current_block: u64) {
     let delta:       u64 = raw_delta > MAX_ACCRUAL_DELTA ? MAX_ACCRUAL_DELTA : raw_delta;
     let do_accrue:  bool = delta > 0u64 && deposited > 0u64;
 
-    let util:        u64 = deposited == 0u64 ? 0u64 : (borrowed * SCALE) / deposited;
+    // NOTE: Leo evaluates both ternary branches, so we must avoid dividing by zero.
+    let safe_deposited: u64 = deposited == 0u64 ? 1u64 : deposited;
+    let raw_util:    u64 = (borrowed * SCALE) / safe_deposited;
+    let util:        u64 = deposited == 0u64 ? 0u64 : raw_util;
+
     let borrow_rate: u64 = (BASE_RATE + (SLOPE_RATE * util) / SCALE)
                            * INDEX_SCALE / (BLOCKS_PER_YEAR * SCALE);
     let supply_rate: u64 = (borrow_rate * util * (SCALE - RESERVE_FACTOR))
@@ -625,12 +652,14 @@ final fn finalize_accrue(current_block: u64) {
     let new_bor_idx: u64 = do_accrue
         ? bor_idx + (bor_idx * borrow_rate * delta) / INDEX_SCALE
         : bor_idx;
+    let fee_rate:    u64 = (borrowed * borrow_rate) / INDEX_SCALE;
     let fee_delta:   u64 = do_accrue
-        ? (borrowed * borrow_rate * delta * RESERVE_FACTOR) / (INDEX_SCALE * SCALE)
+        ? (fee_rate * delta * RESERVE_FACTOR) / SCALE
         : 0u64;
     let new_s_apy:   u64 = (supply_rate * BLOCKS_PER_YEAR * SCALE) / INDEX_SCALE;
     let new_b_apy:   u64 = (borrow_rate * BLOCKS_PER_YEAR * SCALE) / INDEX_SCALE;
-    let new_block:   u64 = do_accrue ? last_block + delta : last_block;
+    // Always advance block marker when delta > 0, even if pool is empty (no accrual needed).
+    let new_block:   u64 = delta > 0u64 ? last_block + delta : last_block;
 
     Mapping::set(supply_index,        id, new_sup_idx);
     Mapping::set(borrow_index,        id, new_bor_idx);
@@ -650,7 +679,7 @@ final fn finalize_withdraw_fees(
     caller:     address
 ) {
     f_transfer.run();
-    assert(caller == aleo1v0ufeajsjwr3lnyq8qay54x3sg7e4ld0287hdt72glr3lhjmn5zqzwnexq);
+    assert(caller == aleo1rhgdu77hgyqd3xjj8ucu3jj9r2krwz6mnzyd80gncr5fxcwlh5rsvzp9px);
     let id: field = 0field;
     let fees: u64 = Mapping::get_or_use(protocol_fees, id, 0u64);
     assert(amount <= fees);

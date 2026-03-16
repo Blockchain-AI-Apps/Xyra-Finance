@@ -233,17 +233,6 @@
           "mode": "Public"
         },
         {
-          "name": "current_block",
-          "ty": {
-            "Plaintext": {
-              "Primitive": {
-                "UInt": "U64"
-              }
-            }
-          },
-          "mode": "Public"
-        },
-        {
           "name": "proofs",
           "ty": {
             "Plaintext": {
@@ -331,17 +320,6 @@
           "mode": "Public"
         },
         {
-          "name": "current_block",
-          "ty": {
-            "Plaintext": {
-              "Primitive": {
-                "UInt": "U64"
-              }
-            }
-          },
-          "mode": "Public"
-        },
-        {
           "name": "proofs",
           "ty": {
             "Plaintext": {
@@ -415,17 +393,6 @@
             }
           },
           "mode": "Public"
-        },
-        {
-          "name": "current_block",
-          "ty": {
-            "Plaintext": {
-              "Primitive": {
-                "UInt": "U64"
-              }
-            }
-          },
-          "mode": "Public"
         }
       ],
       "outputs": [
@@ -460,17 +427,6 @@
             }
           },
           "mode": "Public"
-        },
-        {
-          "name": "current_block",
-          "ty": {
-            "Plaintext": {
-              "Primitive": {
-                "UInt": "U64"
-              }
-            }
-          },
-          "mode": "Public"
         }
       ],
       "outputs": [
@@ -494,19 +450,7 @@
     {
       "name": "accrue_interest",
       "is_async": true,
-      "inputs": [
-        {
-          "name": "current_block",
-          "ty": {
-            "Plaintext": {
-              "Primitive": {
-                "UInt": "U64"
-              }
-            }
-          },
-          "mode": "Public"
-        }
-      ],
+      "inputs": [],
       "outputs": [
         {
           "ty": "Future",
