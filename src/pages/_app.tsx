@@ -55,11 +55,11 @@ function CustomApp({ Component, pageProps }: AppPropsWithLayout) {
             onError={(error) => console.error(error.message)}
           >
             <WalletPersistence>
-            <WalletModalProvider>
-              <ThemeProvider attribute="data-theme" enableSystem={true} defaultTheme="dark">
-                {getLayout(<Component {...pageProps} />)}
-              </ThemeProvider>
-            </WalletModalProvider>
+              <WalletModalProvider>
+                <ThemeProvider attribute="data-theme" enableSystem={true} defaultTheme="dark">
+                  {getLayout(<Component {...pageProps} />)}
+                </ThemeProvider>
+              </WalletModalProvider>
             </WalletPersistence>
           </AleoWalletProvider>
         </Hydrate>

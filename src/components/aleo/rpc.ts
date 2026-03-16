@@ -25,7 +25,7 @@ export async function debugAllRecords(
   }
 
   console.log('🔍 === WALLET RECORDS DIAGNOSIS ===');
-  
+
   const results: any = {
     timestamp: new Date().toISOString(),
     publicKey: publicKey?.substring(0, 20) + '...',
@@ -86,7 +86,7 @@ export async function debugAllRecords(
 
   console.log('🔍 === DIAGNOSIS COMPLETE ===');
   console.log('📊 Summary:', results);
-  
+
   // Store diagnostic in logger
   frontendLogger.storeRecordDiagnostic(
     publicKey,
@@ -96,7 +96,7 @@ export async function debugAllRecords(
     errors,
     warnings
   );
-  
+
   return results;
 }
 
@@ -160,7 +160,7 @@ export async function fetchMappingValueRaw(
 
 export async function fetchBountyStatusAndReward(bountyId: string) {
   try {
- 
+
     const keyU64 = `${bountyId}u64`;
 
 
@@ -194,9 +194,9 @@ export async function readBountyMappings(bountyId: string) {
   const status = await fetchMappingValueRaw('bounty_status', bountyId);
 
   return {
-    creator,  
-    payment,  
-    status,   
+    creator,
+    payment,
+    status,
   };
 }
 
@@ -346,7 +346,7 @@ async function getOrCreateActivity(
     // requestRecords takes two parameters: (programId: string, includeSpent?: boolean)
     const records = await requestRecords(LENDING_POOL_PROGRAM_ID, false);
     console.log('getOrCreateActivity: Found records:', records?.length || 0);
-    
+
     if (records && records.length > 0) {
       // Find the most recent UserActivity record
       // Records are typically returned with the newest last, so iterate in reverse
@@ -354,35 +354,35 @@ async function getOrCreateActivity(
       for (let i = records.length - 1; i >= 0; i--) {
         const record = records[i];
         console.log('getOrCreateActivity: Checking record', i, ':', typeof record);
-        
+
         // Records from the wallet are typically already in the correct format
         if (typeof record === 'string') {
           // If it's already a string, check if it looks like a UserActivity record
-          if (record.includes('owner') || record.includes('total_deposits') || record.includes('total_withdrawals') || 
-              record.includes('total_borrows') || record.includes('total_repayments')) {
+          if (record.includes('owner') || record.includes('total_deposits') || record.includes('total_withdrawals') ||
+            record.includes('total_borrows') || record.includes('total_repayments')) {
             console.log('getOrCreateActivity: Found UserActivity record (string format) - using latest from wallet');
             return record;
           }
         } else if (record && typeof record === 'object') {
           // If it's an object, check if it has UserActivity fields
           const recordData = record;
-          const hasUserActivityFields = 
-            recordData.program_id === LENDING_POOL_PROGRAM_ID || 
+          const hasUserActivityFields =
+            recordData.program_id === LENDING_POOL_PROGRAM_ID ||
             recordData.programId === LENDING_POOL_PROGRAM_ID ||
             recordData.recordName === 'UserActivity' ||
             recordData.type === 'UserActivity' ||
             recordData.recordType === 'UserActivity' ||
             (recordData.data && (
-              recordData.data.total_deposits !== undefined || 
+              recordData.data.total_deposits !== undefined ||
               recordData.data.total_withdrawals !== undefined ||
               recordData.data.total_borrows !== undefined ||
               recordData.data.total_repayments !== undefined
             )) ||
-            (recordData.total_deposits !== undefined || 
-             recordData.total_withdrawals !== undefined ||
-             recordData.total_borrows !== undefined ||
-             recordData.total_repayments !== undefined);
-          
+            (recordData.total_deposits !== undefined ||
+              recordData.total_withdrawals !== undefined ||
+              recordData.total_borrows !== undefined ||
+              recordData.total_repayments !== undefined);
+
           if (hasUserActivityFields) {
             console.log('getOrCreateActivity: Found UserActivity record (object format) - using latest from wallet');
             // Verify the owner matches (if we can extract it)
@@ -396,12 +396,12 @@ async function getOrCreateActivity(
         }
       }
     }
-    
+
     // No record found - return a zero activity for first-time users
     // The contract will accept this and automatically create the activity
     // The wallet adapter expects records as objects with a specific structure
     console.log('getOrCreateActivity: No existing record found, creating zero activity for first-time user');
-    
+
     // Create a zero activity record object that matches the wallet adapter's expected format
     // The wallet adapter expects records to have a structure similar to what requestRecords returns
     // Format: { program_id, data: { owner, total_deposits, total_withdrawals, total_borrows, total_repayments } }
@@ -416,7 +416,7 @@ async function getOrCreateActivity(
         total_repayments: `0u64.private`,
       },
     };
-    
+
     console.log('getOrCreateActivity: Created zero activity record object:', zeroActivityObject);
     return zeroActivityObject;
   } catch (error) {
@@ -588,7 +588,7 @@ export async function lendingDeposit(
     if (!payRecord) {
       throw new Error(
         `No credits.aleo record found with enough microcredits for amount ${amount}. ` +
-          `Make sure you have at least ${amount} private credits in one record.`,
+        `Make sure you have at least ${amount} private credits in one record.`,
       );
     }
 
@@ -851,7 +851,7 @@ export async function lendingRepay(
     if (!payRecord) {
       throw new Error(
         `No credits.aleo record found with enough microcredits for repay amount ${amount}. ` +
-          `Make sure you have at least ${amount} private credits in one record.`,
+        `Make sure you have at least ${amount} private credits in one record.`,
       );
     }
 
@@ -1327,8 +1327,8 @@ function handleUsdcTxError(error: any, action: string): string {
   if (rawMsg.includes('proving failed') || rawMsg.includes('proving error')) {
     throw new Error(
       `${action} failed: Proving failed. The USDCx token program requires valid Merkle proofs for your record. ` +
-        'Placeholder proofs cannot be used on-chain. Obtain valid proofs from your wallet (if it supports USDCx private transfer) or from Provable/token issuer. ' +
-        'See programusdc/inputs/README_DEPOSIT_EXAMPLE.md for details.'
+      'Placeholder proofs cannot be used on-chain. Obtain valid proofs from your wallet (if it supports USDCx private transfer) or from Provable/token issuer. ' +
+      'See programusdc/inputs/README_DEPOSIT_EXAMPLE.md for details.'
     );
   }
   throw new Error(`${action} failed: ${error?.message || 'Unknown error'}`);
@@ -1811,10 +1811,10 @@ export async function getAddressHashFromContract(
   try {
     const inputs: string[] = [];
     const fee = DEFAULT_LENDING_FEE * 1_000_000;
-    const chainId = CURRENT_NETWORK === Network.TESTNET 
-      ? Network.TESTNET 
+    const chainId = CURRENT_NETWORK === Network.TESTNET
+      ? Network.TESTNET
       : String(CURRENT_NETWORK);
-    
+
     const transaction = {
       programId: LENDING_POOL_PROGRAM_ID,
       functionName: 'get_address_hash',
@@ -1822,10 +1822,10 @@ export async function getAddressHashFromContract(
       fee,
       chainId,
     };
-    
+
     const txId = await requestTransaction(transaction);
     console.log('✅ get_address_hash transaction submitted:', txId);
-    
+
     // Wait for transaction to finalize and extract hash from output
     // Note: This is a simplified version - you may need to adjust based on actual transaction output format
     return txId;
@@ -1850,10 +1850,10 @@ export async function getUserActivityFromContract(
   try {
     const inputs: string[] = [];
     const fee = DEFAULT_LENDING_FEE * 1_000_000;
-    const chainId = CURRENT_NETWORK === Network.TESTNET 
-      ? Network.TESTNET 
+    const chainId = CURRENT_NETWORK === Network.TESTNET
+      ? Network.TESTNET
       : String(CURRENT_NETWORK);
-    
+
     const transaction = {
       programId: LENDING_POOL_PROGRAM_ID,
       functionName: 'get_user_activity',
@@ -1861,10 +1861,10 @@ export async function getUserActivityFromContract(
       fee,
       chainId,
     };
-    
+
     const txId = await requestTransaction(transaction);
     console.log('✅ get_user_activity transaction submitted:', txId);
-    
+
     return txId;
   } catch (error: any) {
     console.error('getUserActivityFromContract failed:', error);
@@ -2214,18 +2214,18 @@ function computeAddressHash(address: string): string | null {
       console.log('computeAddressHash: Using cached hash for:', address);
       return cachedHash || null;
     }
-    
+
     console.log('computeAddressHash: BHP256 hash computation via @aleohq/wasm is currently disabled');
     console.log('computeAddressHash: Reason: WASM build issues in Next.js (wbg module resolution)');
     console.log('computeAddressHash: Falling back to contract call method or records method');
-    
+
     // TODO: Once @aleohq/wasm is properly configured with Next.js, implement BHP256 hashing here
     // The implementation would be:
     // 1. Dynamically import @aleohq/wasm (to avoid build-time issues)
     // 2. Use Address.from_string(address)
     // 3. Call BHP256::hash_to_field() equivalent
     // 4. Return the hash as a field string
-    
+
     return null;
   } catch (error) {
     console.error('computeAddressHash: Failed to compute hash:', error);
@@ -2267,12 +2267,12 @@ export async function getUserPosition(
   // The actual cumulative values are in mappings, which require hash computation to read
   // For simplicity, we'll read from records (which show latest transaction amounts)
   // The contract logic correctly updates mappings in finalize functions
-  
+
   // Fallback: Read from records (may be placeholders, but better than nothing)
   if (!requestRecords) {
     console.warn('getUserPosition: requestRecords not available');
-    return { 
-      supplied: '0', 
+    return {
+      supplied: '0',
       borrowed: '0',
       totalDeposits: '0',
       totalWithdrawals: '0',
@@ -2282,8 +2282,8 @@ export async function getUserPosition(
   }
   if (!requestRecords) {
     console.warn('getUserPosition: requestRecords not available');
-    return { 
-      supplied: '0', 
+    return {
+      supplied: '0',
       borrowed: '0',
       totalDeposits: '0',
       totalWithdrawals: '0',
@@ -2301,16 +2301,16 @@ export async function getUserPosition(
     console.log('Step 1: Calling requestRecords with program ID:', LENDING_POOL_PROGRAM_ID);
     console.log('User Address:', publicKey);
     console.log('requestRecords function type:', typeof requestRecords);
-    
+
     // Request records from current program only (lending_pool_v8.aleo)
     let records: any[] | null = null;
-    
+
     try {
       console.log('Requesting records for program:', LENDING_POOL_PROGRAM_ID);
       // requestRecords takes two parameters: (programId: string, includeSpent?: boolean)
       records = await requestRecords(LENDING_POOL_PROGRAM_ID, false);
       console.log('requestRecords returned:', records?.length || 0, 'records');
-      
+
       if (records && Array.isArray(records) && records.length > 0) {
         console.log('✅ Successfully got records from current program');
       } else {
@@ -2320,7 +2320,7 @@ export async function getUserPosition(
       console.warn('requestRecords failed:', recordsError?.message);
       records = null;
     }
-    
+
     console.log('Final records result:');
     console.log('  - Records:', records);
     console.log('  - Is Array:', Array.isArray(records));
@@ -2330,7 +2330,7 @@ export async function getUserPosition(
     console.log('  - Is Undefined:', records === undefined);
     console.log('  - Full Records (first 1000 chars):', JSON.stringify(records, null, 2).substring(0, 1000));
     console.log('========================================');
-    
+
     // Check if records is null, undefined, or empty
     if (records === null || records === undefined) {
       console.error('❌ getUserPosition: requestRecords returned null or undefined');
@@ -2338,8 +2338,8 @@ export async function getUserPosition(
       console.error('  1. The wallet has not indexed records yet');
       console.error('  2. requestRecords function is not working correctly');
       console.error('  3. Permission issue with the wallet');
-      return { 
-        supplied: '0', 
+      return {
+        supplied: '0',
         borrowed: '0',
         totalDeposits: '0',
         totalWithdrawals: '0',
@@ -2347,7 +2347,7 @@ export async function getUserPosition(
         totalRepayments: '0',
       };
     }
-    
+
     if (!Array.isArray(records)) {
       console.error('❌ getUserPosition: requestRecords did not return an array');
       console.error('Returned type:', typeof records);
@@ -2358,8 +2358,8 @@ export async function getUserPosition(
         records = Object.values(records);
         console.log('Converted records:', records);
       } else {
-        return { 
-          supplied: '0', 
+        return {
+          supplied: '0',
           borrowed: '0',
           totalDeposits: '0',
           totalWithdrawals: '0',
@@ -2368,7 +2368,7 @@ export async function getUserPosition(
         };
       }
     }
-    
+
     if (records.length === 0) {
       console.error('❌ getUserPosition: NO RECORDS FOUND (array is empty)');
       console.error('This means the wallet has not indexed the UserActivity record yet.');
@@ -2377,8 +2377,8 @@ export async function getUserPosition(
       console.error('  2. Disconnect and reconnect wallet');
       console.error('  3. Check if transaction actually completed on explorer');
       console.error('  4. Check wallet activity view to see if records are there');
-      return { 
-        supplied: '0', 
+      return {
+        supplied: '0',
         borrowed: '0',
         totalDeposits: '0',
         totalWithdrawals: '0',
@@ -2404,7 +2404,7 @@ export async function getUserPosition(
         console.log(`\n--- Processing Record ${i + 1}/${records.length} ---`);
         console.log('Record type:', typeof record);
         console.log('Record:', record);
-        
+
         let recordData: any;
         if (typeof record === 'string') {
           try {
@@ -2418,46 +2418,46 @@ export async function getUserPosition(
           recordData = record;
           console.log('Record is already an object');
         }
-        
+
         console.log('Record Data:', JSON.stringify(recordData, null, 2));
         console.log('Record Keys:', recordData ? Object.keys(recordData) : 'null');
-        
+
         // Check if this is a UserActivity record - be more lenient
-        const hasUserActivityFields = 
+        const hasUserActivityFields =
           (recordData.data && (
-            recordData.data.total_deposits !== undefined || 
+            recordData.data.total_deposits !== undefined ||
             recordData.data.total_withdrawals !== undefined ||
             recordData.data.total_borrows !== undefined ||
             recordData.data.total_repayments !== undefined
           )) ||
-          (recordData.total_deposits !== undefined || 
-           recordData.total_withdrawals !== undefined ||
-           recordData.total_borrows !== undefined ||
-           recordData.total_repayments !== undefined);
-        
-        const matchesProgram = 
-          recordData.program_id === LENDING_POOL_PROGRAM_ID || 
+          (recordData.total_deposits !== undefined ||
+            recordData.total_withdrawals !== undefined ||
+            recordData.total_borrows !== undefined ||
+            recordData.total_repayments !== undefined);
+
+        const matchesProgram =
+          recordData.program_id === LENDING_POOL_PROGRAM_ID ||
           recordData.programId === LENDING_POOL_PROGRAM_ID ||
           recordData.program === LENDING_POOL_PROGRAM_ID;
-        
+
         const isUserActivity = hasUserActivityFields || matchesProgram;
-        
+
         console.log('Is UserActivity?', isUserActivity);
         console.log('  - Has UserActivity fields:', hasUserActivityFields);
         console.log('  - Matches program:', matchesProgram);
-        
+
         if (isUserActivity || hasUserActivityFields) {
           console.log('✅ Found UserActivity record!');
-          
+
           // Helper function to extract numeric value from various formats
           const extractValue = (value: any): number | undefined => {
             if (value === undefined || value === null) return undefined;
-            
+
             // If it's already a number
             if (typeof value === 'number') {
               return isNaN(value) ? undefined : value;
             }
-            
+
             // If it's a string, try to parse it
             if (typeof value === 'string') {
               // Handle formats like "100u64.private", "100u64", "100"
@@ -2466,16 +2466,16 @@ export async function getUserPosition(
               const num = Number(cleaned);
               return isNaN(num) ? undefined : num;
             }
-            
+
             return undefined;
           };
-          
+
           // Try multiple possible record structures
           let totalDeposits: number | undefined;
           let totalWithdrawals: number | undefined;
           let totalBorrows: number | undefined;
           let totalRepayments: number | undefined;
-          
+
           // Structure 1: recordData.data.total_deposits (nested data) - THIS IS THE ACTUAL FORMAT!
           if (recordData.data) {
             // Values are like "0u64.private" or "100u64.private"
@@ -2485,7 +2485,7 @@ export async function getUserPosition(
             totalRepayments = extractValue(recordData.data.total_repayments);
             console.log('getUserPosition: Extracted from data - deposits:', totalDeposits, 'withdrawals:', totalWithdrawals, 'borrows:', totalBorrows, 'repayments:', totalRepayments);
           }
-          
+
           // Structure 2: recordData.total_deposits (top level)
           if (totalDeposits === undefined && recordData.total_deposits !== undefined) {
             console.log('📦 Trying top-level total_deposits');
@@ -2500,7 +2500,7 @@ export async function getUserPosition(
           if (totalRepayments === undefined && recordData.total_repayments !== undefined) {
             totalRepayments = extractValue(recordData.total_repayments);
           }
-          
+
           // Structure 3: Deep search in the object
           if (totalDeposits === undefined || totalWithdrawals === undefined || totalBorrows === undefined || totalRepayments === undefined) {
             const searchInObject = (obj: any, key: string): any => {
@@ -2514,7 +2514,7 @@ export async function getUserPosition(
               }
               return undefined;
             };
-            
+
             if (totalDeposits === undefined) {
               totalDeposits = extractValue(searchInObject(recordData, 'total_deposits'));
             }
@@ -2528,9 +2528,9 @@ export async function getUserPosition(
               totalRepayments = extractValue(searchInObject(recordData, 'total_repayments'));
             }
           }
-          
+
           console.log('getUserPosition: Extracted values from record - deposits:', totalDeposits, 'withdrawals:', totalWithdrawals, 'borrows:', totalBorrows, 'repayments:', totalRepayments);
-          
+
           // Sum up all values to get cumulative totals
           // Each record represents one transaction, so summing all gives cumulative
           if (totalDeposits !== undefined && !isNaN(totalDeposits)) {
@@ -2545,7 +2545,7 @@ export async function getUserPosition(
           if (totalRepayments !== undefined && !isNaN(totalRepayments)) {
             cumulativeTotalRepayments += totalRepayments;
           }
-          
+
           recordsProcessed++;
           console.log('getUserPosition: Cumulative totals so far - deposits:', cumulativeTotalDeposits, 'withdrawals:', cumulativeTotalWithdrawals, 'borrows:', cumulativeTotalBorrows, 'repayments:', cumulativeTotalRepayments);
         }
@@ -2588,8 +2588,8 @@ export async function getUserPosition(
     };
   } catch (error) {
     console.error('getUserPosition: Failed to fetch user activity from private records:', error);
-    return { 
-      supplied: '0', 
+    return {
+      supplied: '0',
       borrowed: '0',
       totalDeposits: '0',
       totalWithdrawals: '0',
@@ -2846,16 +2846,16 @@ export async function denyProposal(
   proposalId: number
 ): Promise<string> {
   const inputs = [
-    `${caller}.private`,   
-    `${bountyId}.private`, 
-    `${proposalId}.private` 
+    `${caller}.private`,
+    `${bountyId}.private`,
+    `${proposalId}.private`
   ];
-    
-    const result = await client.request('executeTransition', {
-      programId: BOUNTY_PROGRAM_ID,
-      functionName: 'deny_proposal', 
-      inputs, 
-    });
 
-    return result.transactionId;
+  const result = await client.request('executeTransition', {
+    programId: BOUNTY_PROGRAM_ID,
+    functionName: 'deny_proposal',
+    inputs,
+  });
+
+  return result.transactionId;
 }

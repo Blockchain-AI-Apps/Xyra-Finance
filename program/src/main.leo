@@ -6,11 +6,11 @@
 
 import credits.aleo;
 
-program lending_pool_v86.aleo {
+program lending_pool_v86_v2.aleo {
     // ---- Constants ----
     const SCALE: u64 = 1_000_000u64;
     const GLOBAL_KEY: u8 = 0u8;
-    const POOL_VAULT_ADDRESS: address = aleo1a2ehlgqhvs3p7d4hqhs0tvgk954dr8gafu9kxse2mzu9a5sqxvpsrn98pr;
+    const POOL_VAULT_ADDRESS: address = aleo1cw4zdgfgxr064yp43nf2n5d0k0cmrpafua0xqhlsr8w2kx0jsy8s6rcmuw; //account 5
 
     // ---- Interest / APY (fixed-point; INDEX_SCALE = 1e12) ----
     const INDEX_SCALE: u64 = 1_000_000_000_000u64;
@@ -45,9 +45,12 @@ program lending_pool_v86.aleo {
     mapping user_scaled_supply: field => u64;
     mapping user_scaled_borrow: field => u64;
 
+    // For authorization of liquidators
+    mapping authorized_liquidator: address => bool;
+
     // ---- Constructor (Upgradable via Admin) ----
     // Only the specified admin address can upgrade this program.
-    @admin(address = "aleo1rhgdu77hgyqd3xjj8ucu3jj9r2krwz6mnzyd80gncr5fxcwlh5rsvzp9px")
+    @admin(address = "aleo1n4ws5s7vlt4cff9rk5vwuwza4vjja03my4p9j8d45fxy0ady6uzq9jjujy")
     async constructor() {}
 
     // ==================== TRANSITIONS ====================
@@ -187,7 +190,31 @@ program lending_pool_v86.aleo {
         let f: Future = finalize_get_user_activity(user_hash);
         return (placeholder, f);
     }
+    
+    // 8) Admin function to set authorized liquidator
+    async transition set_authorized_liquidator(public liquidator: address) -> Future {
+        assert(self.caller == aleo1n4ws5s7vlt4cff9rk5vwuwza4vjja03my4p9j8d45fxy0ady6uzq9jjujy);
+        return finalize_set_liquidator(liquidator);
+    }
 
+    // 9) PROCESS LIQUIDATION — called only by authorized liquidation program.
+    async transition process_liquidation(
+        public borrower: address,
+        public debt_asset: field,
+        public collateral_asset: field,
+        public repay_amount: u64,
+        public seize_amount: u64,
+        public current_block: u64
+    ) -> Future {
+        let caller: address = self.caller;
+        return finalize_process_liquidation(
+            caller,
+            borrower,
+            repay_amount,
+            seize_amount,
+            current_block
+        );
+    }
     // ==================== FINALIZE FUNCTIONS ====================
 
     async function finalize_deposit_after_transfer(f_transfer: Future, amount: u64, user_hash: field, current_block: u64) {
@@ -454,5 +481,88 @@ program lending_pool_v86.aleo {
         let total_borrows: u64 = Mapping::get_or_use(user_total_borrows, user_hash, 0u64);
         let total_repayments: u64 = Mapping::get_or_use(user_total_repayments, user_hash, 0u64);
         // Values are in mappings, cannot return from finalize function
+    }
+
+    async function finalize_set_liquidator(liquidator: address) {
+        Mapping::set(authorized_liquidator, liquidator, true);
+    }
+
+    async function finalize_process_liquidation(
+        caller: address,
+        borrower: address,
+        repay_amount: u64,
+        seize_amount: u64,
+        current_block: u64
+        ) {
+        // Guard: only authorized liquidator may call
+        let ok: bool = Mapping::get_or_use(authorized_liquidator, caller, false);
+        assert(ok);
+
+        let borrower_hash: field = BHP256::hash_to_field(borrower);
+
+        // ---- Inlined interest accrual (same pattern as other finalize functions) ----
+        let lub: u64 = Mapping::get_or_use(last_update_block, GLOBAL_KEY, 0u64);
+        if current_block > lub {
+            let delta: u64 = current_block - lub;
+            let effective_delta: u64 = (delta > MAX_ACCRUAL_DELTA) ? MAX_ACCRUAL_DELTA : delta;
+            last_update_block.set(GLOBAL_KEY, lub + effective_delta);
+            let ts: u64 = Mapping::get_or_use(total_supplied, GLOBAL_KEY, 0u64);
+            if ts > 0u64 {
+                let tb: u64 = Mapping::get_or_use(total_borrowed, GLOBAL_KEY, 0u64);
+                let li: u64 = Mapping::get_or_use(liquidity_index, GLOBAL_KEY, INDEX_SCALE);
+                let bi: u64 = Mapping::get_or_use(borrow_index, GLOBAL_KEY, INDEX_SCALE);
+                let util: u64 = (tb * SCALE) / ts;
+                let br: u64 = BASE_RATE_PER_BLOCK + (SLOPE_PER_UTIL * util) / SCALE;
+                let sr: u64 = (br * util * (10000u64 - RESERVE_FACTOR_BPS)) / (SCALE * 10000u64);
+                let li_new: u64 = li + (li * sr * effective_delta) / INDEX_SCALE;
+                let bi_new: u64 = bi + (bi * br * effective_delta) / INDEX_SCALE;
+                liquidity_index.set(GLOBAL_KEY, li_new);
+                borrow_index.set(GLOBAL_KEY, bi_new);
+            }
+        }
+        // ---- End accrual ----
+
+        let li: u64 = Mapping::get_or_use(liquidity_index, GLOBAL_KEY, INDEX_SCALE);
+        let bi: u64 = Mapping::get_or_use(borrow_index, GLOBAL_KEY, INDEX_SCALE);
+
+        // ---- Repay borrow side ----
+        let scaled_bor: u64 = Mapping::get_or_use(user_scaled_borrow, borrower_hash, 0u64);
+        let real_debt:  u64 = (scaled_bor * bi) / INDEX_SCALE;
+        let repay:      u64 = repay_amount > real_debt ? real_debt : repay_amount;
+        let scaled_rep: u64 = (repay * INDEX_SCALE) / bi;
+        let new_s_bor:  u64 = scaled_bor > scaled_rep ? scaled_bor - scaled_rep : 0u64;
+        Mapping::set(user_scaled_borrow, borrower_hash, new_s_bor);
+
+        // ---- Seize collateral side ----
+        let scaled_sup: u64 = Mapping::get_or_use(user_scaled_supply, borrower_hash, 0u64);
+        let real_coll:  u64 = (scaled_sup * li) / INDEX_SCALE;
+        let seize:      u64 = seize_amount > real_coll ? real_coll : seize_amount;
+        let scaled_sez: u64 = (seize * INDEX_SCALE) / li;
+        let new_s_sup:  u64 = scaled_sup > scaled_sez ? scaled_sup - scaled_sez : 0u64;
+        Mapping::set(user_scaled_supply, borrower_hash, new_s_sup);
+
+        // ---- Pool accounting ----
+        let prev_supplied: u64 = Mapping::get_or_use(total_supplied, GLOBAL_KEY, 0u64);
+        let prev_borrowed: u64 = Mapping::get_or_use(total_borrowed, GLOBAL_KEY, 0u64);
+
+        let new_borrowed:  u64 = prev_borrowed > repay ? prev_borrowed - repay : 0u64;
+        let new_supplied:  u64 = prev_supplied > seize ? prev_supplied - seize : 0u64;
+
+        Mapping::set(total_borrowed, GLOBAL_KEY, new_borrowed);
+        Mapping::set(total_supplied, GLOBAL_KEY, new_supplied);
+
+        // Update utilization index
+        let new_util: u64 = new_supplied == 0u64 ? 0u64 : (new_borrowed * SCALE) / new_supplied;
+        Mapping::set(utilization_index, GLOBAL_KEY, new_util);
+
+        // ---- Update user total deposits (collateral seized) ----
+        let current_deposits: u64 = Mapping::get_or_use(user_total_deposits, borrower_hash, 0u64);
+        let new_deposits: u64 = current_deposits > seize ? current_deposits - seize : 0u64;
+        Mapping::set(user_total_deposits, borrower_hash, new_deposits);
+
+        // ---- Update user total borrows (debt repaid) ----
+        let current_borrows: u64 = Mapping::get_or_use(user_total_borrows, borrower_hash, 0u64);
+        let new_borrows: u64 = current_borrows > repay ? current_borrows - repay : 0u64;
+        Mapping::set(user_total_borrows, borrower_hash, new_borrows);
     }
 }
