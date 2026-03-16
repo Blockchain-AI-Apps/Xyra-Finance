@@ -7,3 +7,9 @@ program/build
 program/backup
 Docs
 scripts/*.sh
+
+# Local devnet data
+.ledger-*
+.node-data-*
+devnet*.log
+tsconfig.tsbuildinfo
