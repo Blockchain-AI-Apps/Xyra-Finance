@@ -169,7 +169,7 @@ program lending_pool_v2.aleo {
     }
 
     // ----------------------------------------------------------------
-    // 2) WITHDRAW — pool vault sends public credits back to caller.
+    // 2) WITHDRAW — state-only; backend sends credits from vault to user.
     // ----------------------------------------------------------------
     fn withdraw(
         public amount:        u64
@@ -177,8 +177,6 @@ program lending_pool_v2.aleo {
         assert(amount > 0u64);
         let caller: address = self.caller;
         let user_key: field = BHP256::hash_to_field(caller);
-
-        let f_transfer: Final = credits.aleo/transfer_public(caller, amount);
 
         let receipt: UserActivity = UserActivity {
             owner:             caller,
@@ -189,11 +187,11 @@ program lending_pool_v2.aleo {
             total_repayments:  0u64,
         };
 
-        return (receipt, final { finalize_withdraw(f_transfer, amount, user_key); });
+        return (receipt, final { finalize_withdraw(amount, user_key); });
     }
 
     // ----------------------------------------------------------------
-    // 3) BORROW — pool vault sends public credits to caller.
+    // 3) BORROW — state-only; backend sends credits from vault to user.
     // ----------------------------------------------------------------
     fn borrow(
         public amount:        u64
@@ -201,8 +199,6 @@ program lending_pool_v2.aleo {
         assert(amount > 0u64);
         let caller: address = self.caller;
         let user_key: field = BHP256::hash_to_field(caller);
-
-        let f_transfer: Final = credits.aleo/transfer_public(caller, amount);
 
         let receipt: UserActivity = UserActivity {
             owner:             caller,
@@ -213,7 +209,7 @@ program lending_pool_v2.aleo {
             total_repayments:  0u64,
         };
 
-        return (receipt, final { finalize_borrow(f_transfer, amount, user_key); });
+        return (receipt, final { finalize_borrow(amount, user_key); });
     }
 
     // ----------------------------------------------------------------
@@ -254,12 +250,12 @@ program lending_pool_v2.aleo {
 
     // ----------------------------------------------------------------
     // 6) WITHDRAW FEES — admin withdraws accumulated protocol fees.
+    //    State-only; backend sends credits from vault to admin.
     // ----------------------------------------------------------------
     fn withdraw_fees(public amount: u64) -> Final {
         assert(amount > 0u64);
         let caller: address = self.caller;
-        let f_transfer: Final = credits.aleo/transfer_public(caller, amount);
-        return final { finalize_withdraw_fees(f_transfer, amount, caller); };
+        return final { finalize_withdraw_fees(amount, caller); };
     }
 }
 
@@ -379,13 +375,9 @@ final fn finalize_deposit(
 // FINALIZE WITHDRAW
 // ----------------------------------------------------------------
 final fn finalize_withdraw(
-    f_transfer:    Final,
     amount:        u64,
     user_key:      field
 ) {
-    // 1. Run transfer. Tx reverts atomically if any assert below fails.
-    f_transfer.run();
-
     let id: field = 0field;
 
     // 2. ---- Inlined interest accrual ----
@@ -463,13 +455,9 @@ final fn finalize_withdraw(
 // FINALIZE BORROW
 // ----------------------------------------------------------------
 final fn finalize_borrow(
-    f_transfer:    Final,
     amount:        u64,
     user_key:      field
 ) {
-    // 1. Run transfer. Reverts atomically if LTV/liquidity asserts fail.
-    f_transfer.run();
-
     let id: field = 0field;
 
     // 2. ---- Inlined interest accrual ----
@@ -674,11 +662,9 @@ final fn finalize_accrue() {
 // FINALIZE WITHDRAW FEES
 // ----------------------------------------------------------------
 final fn finalize_withdraw_fees(
-    f_transfer: Final,
     amount:     u64,
     caller:     address
 ) {
-    f_transfer.run();
     assert(caller == aleo1rhgdu77hgyqd3xjj8ucu3jj9r2krwz6mnzyd80gncr5fxcwlh5rsvzp9px);
     let id: field = 0field;
     let fees: u64 = Mapping::get_or_use(protocol_fees, id, 0u64);
