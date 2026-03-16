@@ -494,8 +494,7 @@ export async function getPrivateCreditsBalance(
  * Contract: lending_pool_v86.aleo
  *   async transition deposit_with_credits(
  *     pay_record: credits.aleo/credits,
- *     public amount: u64,
- *     public current_block: u64
+ *     public amount: u64
  *   ) -> (UserActivity, credits.aleo/credits, Future)
  */
 export async function lendingDeposit(
@@ -618,9 +617,7 @@ export async function lendingDeposit(
     }
 
     const amountInput = `${amountMicro}u64`;
-    const currentBlock = await getLatestBlockHeight();
-    const currentBlockInput = `${Math.max(0, currentBlock)}u64`;
-    const inputs: any[] = [recordInput, amountInput, currentBlockInput];
+    const inputs: any[] = [recordInput, amountInput];
 
     console.log('🔍 Calling executeTransaction for deposit_with_credits...', {
       program: LENDING_POOL_PROGRAM_ID,
@@ -628,7 +625,6 @@ export async function lendingDeposit(
       inputsPreview: {
         input0_len: recordInput.length,
         input1: amountInput,
-        input2: currentBlockInput,
       },
     });
 
@@ -691,9 +687,7 @@ export async function lendingBorrow(
 
   try {
     const amountMicro = Math.round(amount * 1_000_000);
-    const currentBlock = await getLatestBlockHeight();
-    const currentBlockInput = `${Math.max(0, currentBlock)}u64`;
-    const inputs = [`${amountMicro}u64`, currentBlockInput];
+    const inputs = [`${amountMicro}u64`];
 
     // Check pool liquidity (same logic as before)
     try {
@@ -765,8 +759,7 @@ export async function lendingBorrow(
  * Contract: lending_pool_v86.aleo
  *   async transition repay_with_credits(
  *     pay_record: credits.aleo/credits,
- *     public amount: u64,
- *     public current_block: u64
+ *     public amount: u64
  *   ) -> (UserActivity, credits.aleo/credits, Future)
  *
  * This mirrors `lendingDeposit` but calls `repay_with_credits` instead of `deposit_with_credits`.
@@ -881,9 +874,7 @@ export async function lendingRepay(
     }
 
     const amountInput = `${amountMicro}u64`;
-    const currentBlock = await getLatestBlockHeight();
-    const currentBlockInput = `${Math.max(0, currentBlock)}u64`;
-    const inputs: any[] = [recordInput, amountInput, currentBlockInput];
+    const inputs: any[] = [recordInput, amountInput];
 
     console.log('🔍 Calling executeTransaction for repay_with_credits...', {
       program: LENDING_POOL_PROGRAM_ID,
@@ -891,7 +882,6 @@ export async function lendingRepay(
       inputsPreview: {
         input0_len: typeof recordInput === 'string' ? recordInput.length : 'object',
         input1: amountInput,
-        input2: currentBlockInput,
       },
     });
 
@@ -954,9 +944,7 @@ export async function lendingWithdraw(
 
   try {
     const amountMicro = Math.round(amount * 1_000_000);
-    const currentBlock = await getLatestBlockHeight();
-    const currentBlockInput = `${Math.max(0, currentBlock)}u64`;
-    const inputs = [`${amountMicro}u64`, currentBlockInput];
+    const inputs = [`${amountMicro}u64`];
 
     console.log('🔍 Calling executeTransaction for withdraw (public fee)...');
     const result = await executeTransaction({
@@ -997,10 +985,10 @@ export async function lendingWithdraw(
 }
 
 // --- USDC Pool (lending_pool_usdce_v86.aleo) ---
-// Contract: deposit(token, amount, current_block, proofs), repay(token, amount, current_block, proofs),
-//           withdraw(public amount, public current_block), borrow(public amount, public current_block).
-// - deposit/repay: 4 inputs — token, amount (micro-USDC), current_block (u64), proofs.
-// - withdraw/borrow: 2 inputs — amount (micro-USDC), current_block (u64). Backend sends USDCx from vault to user.
+// Contract: deposit(token, amount, proofs), repay(token, amount, proofs),
+//           withdraw(public amount), borrow(public amount).
+// - deposit/repay: 3 inputs — token, amount (micro-USDC), proofs. Block height is read on-chain.
+// - withdraw/borrow: 1 input — amount (micro-USDC). Backend sends USDCx from vault to user.
 // Amount in program is micro-USDC (1 USDC = 1_000_000). RPC accepts human USDC and converts to micro for transitions.
 const USDC_TOKEN_PROGRAM = USDC_TOKEN_PROGRAM_ID;
 
@@ -1335,7 +1323,7 @@ function handleUsdcTxError(error: any, action: string): string {
 }
 
 /**
- * USDC deposit: lending_pool_usdce_v86.aleo/deposit(token, amount, current_block, proofs) — 4 inputs.
+ * USDC deposit: lending_pool_usdce_v86.aleo/deposit(token, amount, proofs) — 3 inputs.
  * Amount in human USDC; converted to micro-USDC for the program.
  */
 export async function lendingDepositUsdc(
@@ -1354,8 +1342,6 @@ export async function lendingDepositUsdc(
     }
     const amountMicro = Math.round(amount * 1_000_000);
     const amountStr = `${amountMicro}u64`;
-    const currentBlock = await getLatestBlockHeight();
-    const currentBlockStr = `${Math.max(0, currentBlock)}u64`;
     let proofsEncoded: string;
     if (typeof proofs === 'string' && proofs.trim().startsWith('[') && proofs.includes('siblings')) {
       proofsEncoded = proofs.trim();
@@ -1369,13 +1355,12 @@ export async function lendingDepositUsdc(
           : DEFAULT_USDC_MERKLE_PROOFS;
     }
 
-    const inputs: (string | any)[] = [tokenInput, amountStr, currentBlockStr, proofsEncoded];
+    const inputs: (string | any)[] = [tokenInput, amountStr, proofsEncoded];
 
-    console.log('[USDC deposit] All 4 inputs:', {
+    console.log('[USDC deposit] All 3 inputs:', {
       input0_token: tokenInput,
       input1_amount: amountStr,
-      input2_current_block: currentBlockStr,
-      input3_proofs: proofsEncoded,
+      input2_proofs: proofsEncoded,
     });
 
     const result = await executeTransaction({
@@ -1394,7 +1379,7 @@ export async function lendingDepositUsdc(
 }
 
 /**
- * USDC repay: lending_pool_usdce_v86.aleo/repay(token, amount, current_block, proofs) — 4 inputs.
+ * USDC repay: lending_pool_usdce_v86.aleo/repay(token, amount, proofs) — 3 inputs.
  * Amount in human USDC; converted to micro-USDC for the program.
  */
 export async function lendingRepayUsdc(
@@ -1413,8 +1398,6 @@ export async function lendingRepayUsdc(
     }
     const amountMicro = Math.round(amount * 1_000_000);
     const amountStr = `${amountMicro}u64`;
-    const currentBlock = await getLatestBlockHeight();
-    const currentBlockStr = `${Math.max(0, currentBlock)}u64`;
     let proofsEncoded: string;
     if (typeof proofs === 'string' && proofs.trim().startsWith('[') && proofs.includes('siblings')) {
       proofsEncoded = proofs.trim();
@@ -1427,13 +1410,12 @@ export async function lendingRepayUsdc(
           ? (proofsInput[0].startsWith('{') ? `[${proofsInput[0]}, ${proofsInput[1]}]` : proofsInput.join(','))
           : DEFAULT_USDC_MERKLE_PROOFS;
     }
-    const inputs: (string | any)[] = [tokenInput, amountStr, currentBlockStr, proofsEncoded];
+    const inputs: (string | any)[] = [tokenInput, amountStr, proofsEncoded];
 
-    console.log('[USDC repay] All 4 inputs:', {
+    console.log('[USDC repay] All 3 inputs:', {
       input0_token: tokenInput,
       input1_amount: amountStr,
-      input2_current_block: currentBlockStr,
-      input3_proofs: proofsEncoded,
+      input2_proofs: proofsEncoded,
     });
 
     const result = await executeTransaction({
@@ -1459,8 +1441,7 @@ export async function lendingWithdrawUsdc(
   if (amount <= 0) throw new Error('Withdraw amount must be greater than 0');
   try {
     const amountMicro = Math.round(amount * 1_000_000);
-    const currentBlock = await getLatestBlockHeight();
-    const inputs = [`${amountMicro}u64`, `${Math.max(0, currentBlock)}u64`];
+    const inputs = [`${amountMicro}u64`];
     const result = await executeTransaction({
       program: USDC_LENDING_POOL_PROGRAM_ID,
       function: 'withdraw',
@@ -1484,8 +1465,7 @@ export async function lendingBorrowUsdc(
   if (amount <= 0) throw new Error('Borrow amount must be greater than 0');
   try {
     const amountMicro = Math.round(amount * 1_000_000);
-    const currentBlock = await getLatestBlockHeight();
-    const inputs = [`${amountMicro}u64`, `${Math.max(0, currentBlock)}u64`];
+    const inputs = [`${amountMicro}u64`];
     const result = await executeTransaction({
       program: USDC_LENDING_POOL_PROGRAM_ID,
       function: 'borrow',
@@ -1503,18 +1483,16 @@ export async function lendingBorrowUsdc(
 
 /**
  * Accrue interest on the Aleo pool (v86) using wallet adapter.
- * accrue_interest(public current_block: u64) — updates liquidity_index and borrow_index up to current_block.
+ * accrue_interest() — updates liquidity_index and borrow_index using on-chain block.height.
  * Anyone can call; indices are also updated automatically on every deposit, borrow, repay, withdraw.
  */
 export async function lendingAccrueInterest(
   executeTransaction: ((tx: any) => Promise<any>) | undefined,
-  currentBlock: number
 ): Promise<string> {
   console.log('========================================');
   console.log('📈 LENDING ACCRUE INTEREST FUNCTION CALLED (Aleo pool)');
   console.log('========================================');
   console.log('📥 Input Parameters:', {
-    currentBlock,
     network: CURRENT_NETWORK,
     programId: LENDING_POOL_PROGRAM_ID,
   });
@@ -1525,8 +1503,7 @@ export async function lendingAccrueInterest(
   const fee = DEFAULT_LENDING_FEE * 1_000_000;
 
   try {
-    const blockInput = `${Math.max(0, currentBlock)}u64`;
-    const inputs = [blockInput];
+    const inputs: string[] = [];
     console.log('💰 Transaction Configuration:', {
       inputs,
       fee: `${fee} microcredits`,
@@ -1585,16 +1562,14 @@ export async function lendingAccrueInterest(
  */
 export async function lendingAccrueInterestUsdc(
   executeTransaction: ((tx: any) => Promise<any>) | undefined,
-  currentBlock: number
 ): Promise<string> {
   if (!executeTransaction) throw new Error('executeTransaction is not available.');
   const fee = DEFAULT_LENDING_FEE * 1_000_000;
   try {
-    const blockInput = `${Math.max(0, currentBlock)}u64`;
     const result = await executeTransaction({
       program: USDC_LENDING_POOL_PROGRAM_ID,
       function: 'accrue_interest',
-      inputs: [blockInput],
+      inputs: [],
       fee,
       privateFee: false,
     });

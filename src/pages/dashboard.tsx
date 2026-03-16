@@ -28,7 +28,6 @@ import {
   getPrivateUsdcBalance,
   lendingAccrueInterest,
   lendingAccrueInterestUsdc,
-  getLatestBlockHeight,
   debugAllRecords,
   LENDING_POOL_PROGRAM_ID,
   USDC_LENDING_POOL_PROGRAM_ID,
@@ -1501,9 +1500,8 @@ const DashboardPage: NextPageWithLayout = () => {
       setLoading(true);
       setStatusMessage('Accruing interest...');
 
-      const currentBlock = await getLatestBlockHeight();
-      const tx = await lendingAccrueInterest(executeTransaction, currentBlock);
-      
+      const tx = await lendingAccrueInterest(executeTransaction);
+
       setTxId(null);
       setTxFinalized(false);
       setStatusMessage('Interest accrual submitted. Waiting for finalization…');
@@ -1605,8 +1603,7 @@ const DashboardPage: NextPageWithLayout = () => {
       setLoading(true);
       setStatusMessage('Accruing USDC interest...');
 
-      const currentBlock = await getLatestBlockHeight();
-      const tx = await lendingAccrueInterestUsdc(executeTransaction, currentBlock);
+      const tx = await lendingAccrueInterestUsdc(executeTransaction);
 
       setTxId(null);
       setTxFinalized(false);
