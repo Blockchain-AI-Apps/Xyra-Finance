@@ -28,7 +28,7 @@
 
 import credits.aleo;
 
-program lending_pool_v3.aleo {
+program lending_pool_v90.aleo {
 
     // ================================================================
     // CONSTANTS
@@ -47,7 +47,11 @@ program lending_pool_v3.aleo {
     /// (index * rate * delta) / INDEX_SCALE.
     const MAX_ACCRUAL_DELTA: u64 = 1_000u64;
 
-    /// Pool vault — holds all public credit balances on behalf of the pool.
+    /// Testnet admin address derived from the deployment private key in `.env`.
+    const ADMIN_ADDRESS: address =
+        aleo1a2ehlgqhvs3p7d4hqhs0tvgk954dr8gafu9kxse2mzu9a5sqxvpsrn98pr;
+
+    /// Backend-controlled vault that receives deposits and repayments.
     const POOL_VAULT_ADDRESS: address =
         aleo1a2ehlgqhvs3p7d4hqhs0tvgk954dr8gafu9kxse2mzu9a5sqxvpsrn98pr;
 
@@ -89,6 +93,9 @@ program lending_pool_v3.aleo {
     /// Accumulated protocol reserve fees.
     mapping protocol_fees:       u8 => u64;
 
+    /// Realized protocol fee cash available for withdrawal.
+    mapping withdrawable_fees:   u8 => u64;
+
     /// Annualised supply APY in basis points (read-only for UIs).
     mapping supply_apy:          u8 => u64;
 
@@ -107,6 +114,9 @@ program lending_pool_v3.aleo {
 
     /// real_debt = user_scaled_borrow * borrow_index / INDEX_SCALE
     mapping user_scaled_borrow:  field => u64;
+
+    /// User principal outstanding, excluding accrued interest.
+    mapping user_principal_borrow: field => u64;
 
     // ================================================================
     // RECORDS
@@ -127,12 +137,12 @@ program lending_pool_v3.aleo {
     // Call initialize() once after deployment to seed mapping values.
     // ================================================================
 
-    // @admin constructor removed for devnet testing (snarkOS version incompatibility)
-    // The initialize() function still enforces admin-only access via assert.
+    @admin(address = "aleo1a2ehlgqhvs3p7d4hqhs0tvgk954dr8gafu9kxse2mzu9a5sqxvpsrn98pr")
+    async constructor() {}
 
     /// One-time initialisation — must be called by the admin after deploy.
     async transition initialize() -> Future {
-        assert(self.caller == aleo1a2ehlgqhvs3p7d4hqhs0tvgk954dr8gafu9kxse2mzu9a5sqxvpsrn98pr);
+        assert(self.caller == ADMIN_ADDRESS);
         return finalize_initialize();
     }
 
@@ -141,12 +151,11 @@ program lending_pool_v3.aleo {
     // ================================================================
 
     // ----------------------------------------------------------------
-    // 1) DEPOSIT — user sends private credits to the pool vault.
+    // 1) DEPOSIT — user sends private credits into the backend vault.
     // ----------------------------------------------------------------
     async transition deposit_with_credits(
         pay_record:           credits.aleo/credits,
-        public amount:        u64,
-        public current_block: u64
+        public amount:        u64
     ) -> (UserActivity, credits.aleo/credits, Future) {
         assert(amount > 0u64);
         let caller: address = self.caller;
@@ -166,11 +175,11 @@ program lending_pool_v3.aleo {
             total_repayments:  0u64,
         };
 
-        return (receipt, change, finalize_deposit(f_transfer, amount, user_key, current_block));
+        return (receipt, change, finalize_deposit(f_transfer, amount, user_key));
     }
 
     // ----------------------------------------------------------------
-    // 2) WITHDRAW — state-only; backend sends credits from vault to user.
+    // 2) WITHDRAW — state-only; backend sends credits from the vault.
     // ----------------------------------------------------------------
     async transition withdraw(
         public amount:        u64
@@ -192,7 +201,7 @@ program lending_pool_v3.aleo {
     }
 
     // ----------------------------------------------------------------
-    // 3) BORROW — state-only; backend sends credits from vault to user.
+    // 3) BORROW — state-only; backend sends credits from the vault.
     // ----------------------------------------------------------------
     async transition borrow(
         public amount:        u64
@@ -214,7 +223,7 @@ program lending_pool_v3.aleo {
     }
 
     // ----------------------------------------------------------------
-    // 4) REPAY — user sends private credits to the pool vault.
+    // 4) REPAY — user sends private credits into the backend vault.
     // ----------------------------------------------------------------
     async transition repay_with_credits(
         pay_record:           credits.aleo/credits,
@@ -250,12 +259,12 @@ program lending_pool_v3.aleo {
     }
 
     // ----------------------------------------------------------------
-    // 6) WITHDRAW FEES — admin withdraws accumulated protocol fees.
-    //    State-only; backend sends credits from vault to admin.
+    // 6) WITHDRAW FEES — state-only; backend sends realized fees from the vault.
     // ----------------------------------------------------------------
     async transition withdraw_fees(public amount: u64) -> Future {
         assert(amount > 0u64);
         let caller: address = self.caller;
+        assert(caller == ADMIN_ADDRESS);
         return finalize_withdraw_fees(amount, caller);
     }
 
@@ -284,7 +293,8 @@ async function finalize_initialize() {
     Mapping::set(total_borrowed,      id, 0u64);
     Mapping::set(available_liquidity, id, 0u64);
     Mapping::set(protocol_fees,       id, 0u64);
-    Mapping::set(supply_apy,          id, BASE_RATE);
+    Mapping::set(withdrawable_fees,   id, 0u64);
+    Mapping::set(supply_apy,          id, 0u64);
     Mapping::set(borrow_apy,          id, BASE_RATE);
 
     Mapping::set(initialized, 0field, true);
@@ -296,16 +306,19 @@ async function finalize_initialize() {
 async function finalize_deposit(
         f_transfer:    Future,
         amount:        u64,
-        user_key:      field,
-        current_block: u64
+        user_key:      field
     ) {
+        let is_initialized: bool = Mapping::get_or_use(initialized, 0field, false);
+        assert(is_initialized);
         f_transfer.await();
 
         let id: u8 = 0u8;
 
         // ---- Load state ----
+        let current_block: u64 = (block.height as u64);
         let last_block:  u64 = Mapping::get_or_use(last_accrual_block,  id, 0u64);
         let prev_avail:  u64 = Mapping::get_or_use(available_liquidity, id, 0u64);
+        let total_deposit: u64 = Mapping::get_or_use(total_deposited, id, 0u64);
 
         // ---- Accrual block check ----
         if current_block > last_block {
@@ -315,14 +328,13 @@ async function finalize_deposit(
             // SET 1
             Mapping::set(last_accrual_block, id, last_block + effective_delta);
 
-            let ts: u64 = Mapping::get_or_use(total_deposited, id, 0u64);
-            if ts > 0u64 {
+            if total_deposit > 0u64 {
                 let tb:   u64 = Mapping::get_or_use(total_borrowed,  id, 0u64);
                 let li:   u64 = Mapping::get_or_use(supply_index,    id, INDEX_SCALE);
                 let bi:   u64 = Mapping::get_or_use(borrow_index,    id, INDEX_SCALE);
                 let fees: u64 = Mapping::get_or_use(protocol_fees,   id, 0u64);
 
-                let util:      u64 = (tb * SCALE) / ts;
+                let util:      u64 = (tb * SCALE) / total_deposit;
                 let br:        u64 = (BASE_RATE + (SLOPE_RATE * util) / SCALE)
                                     * INDEX_SCALE / (BLOCKS_PER_YEAR * SCALE);
                 let sr:        u64 = (br * util * (SCALE - RESERVE_FACTOR)) / (SCALE * SCALE);
@@ -342,52 +354,15 @@ async function finalize_deposit(
         let li:          u64 = Mapping::get_or_use(supply_index,       id, INDEX_SCALE);
         let safe_idx:    u64 = li == 0u64 ? INDEX_SCALE : li;
         let scaled_in:   u64 = (amount * INDEX_SCALE) / safe_idx;
+        assert(scaled_in > 0u64);
         let prev_scaled: u64 = Mapping::get_or_use(user_scaled_supply, user_key, 0u64);
 
         // SET 5
         Mapping::set(user_scaled_supply, user_key, prev_scaled + scaled_in);
 
-        // ---- Update pool totals (same condition checks as working version) ----
-        if total_deposited.contains(id) && total_borrowed.contains(id) {
-            let prev_supplied: u64 = total_deposited.get(id);
-            let new_supplied:  u64 = prev_supplied + amount;
-            // SET 6
-            Mapping::set(total_deposited, id, new_supplied);
-            if new_supplied == 0u64 {
-                // SET 7
-                Mapping::set(available_liquidity, id, 0u64);
-            } else {
-                // SET 7
-                Mapping::set(available_liquidity, id, prev_avail + amount);
-            }
-        } else if total_deposited.contains(id) {
-            let prev_supplied: u64 = total_deposited.get(id);
-            let new_supplied:  u64 = prev_supplied + amount;
-            // SET 8
-            Mapping::set(total_deposited, id, new_supplied);
-            if new_supplied == 0u64 {
-                // SET 9
-                Mapping::set(available_liquidity, id, 0u64);
-            } else {
-                // SET 9
-                Mapping::set(available_liquidity, id, prev_avail + amount);
-            }
-        } else if total_borrowed.contains(id) {
-            let new_supplied: u64 = amount;
-            // SET 10
-            Mapping::set(total_deposited, id, new_supplied);
-            if new_supplied == 0u64 {
-                // SET 11
-                Mapping::set(available_liquidity, id, 0u64);
-            } else {
-                // SET 11
-                Mapping::set(available_liquidity, id, prev_avail + amount);
-            }
-        } else {
-            // SET 10, 11
-            Mapping::set(total_deposited,     id, amount);
-            Mapping::set(available_liquidity, id, amount);
-        }
+        // ---- Update pool totals ----
+        Mapping::set(total_deposited,     id, total_deposit + amount);
+        Mapping::set(available_liquidity, id, prev_avail + amount);
     }
 
 // ----------------------------------------------------------------
@@ -397,6 +372,8 @@ async function finalize_withdraw(
     amount:        u64,
     user_key:      field
 ) {
+    let is_initialized: bool = Mapping::get_or_use(initialized, 0field, false);
+    assert(is_initialized);
     let id: u8 = 0u8;
 
     // 2. ---- Inlined interest accrual ----
@@ -458,7 +435,10 @@ async function finalize_withdraw(
     assert(real_debt == 0u64 || real_debt <= max_debt);
 
     // 5. Debit user's scaled supply.
-    let scaled_out:   u64 = (amount * INDEX_SCALE) / new_sup_idx;
+    let scaled_num:   u64 = amount * INDEX_SCALE;
+    let scaled_div:   u64 = scaled_num / new_sup_idx;
+    let scaled_rem:   u64 = scaled_num % new_sup_idx;
+    let scaled_out:   u64 = scaled_rem == 0u64 ? scaled_div : scaled_div + 1u64;
     let new_scaled:   u64 = scaled_sup > scaled_out ? scaled_sup - scaled_out : 0u64;
     Mapping::set(user_scaled_supply, user_key, new_scaled);
 
@@ -477,6 +457,8 @@ async function finalize_borrow(
     amount:        u64,
     user_key:      field
 ) {
+    let is_initialized: bool = Mapping::get_or_use(initialized, 0field, false);
+    assert(is_initialized);
     let id: u8 = 0u8;
 
     // 2. ---- Inlined interest accrual ----
@@ -538,8 +520,13 @@ async function finalize_borrow(
     assert(amount <= avail);
 
     // 5. Record scaled borrow.
-    let scaled_in:        u64 = (amount * INDEX_SCALE) / new_bor_idx;
+    let scaled_num:       u64 = amount * INDEX_SCALE;
+    let scaled_div:       u64 = scaled_num / new_bor_idx;
+    let scaled_rem:       u64 = scaled_num % new_bor_idx;
+    let scaled_in:        u64 = scaled_rem == 0u64 ? scaled_div : scaled_div + 1u64;
     Mapping::set(user_scaled_borrow, user_key, scaled_bor + scaled_in);
+    let principal_outstanding: u64 = Mapping::get_or_use(user_principal_borrow, user_key, 0u64);
+    Mapping::set(user_principal_borrow, user_key, principal_outstanding + amount);
 
     // 6. Update pool accounting.
     Mapping::set(total_borrowed,      id, borrowed + amount);
@@ -555,6 +542,8 @@ async function finalize_repay(
     amount:        u64,
     user_key:      field
 ) {
+    let is_initialized: bool = Mapping::get_or_use(initialized, 0field, false);
+    assert(is_initialized);
     // 1. Confirm vault received the repaid funds.
     f_transfer.await();
 
@@ -610,24 +599,45 @@ async function finalize_repay(
     let scaled_bor:   u64 = Mapping::get_or_use(user_scaled_borrow, user_key, 0u64);
     let real_debt:    u64 = (scaled_bor * new_bor_idx) / INDEX_SCALE;
     assert(amount <= real_debt);
+    let principal_outstanding: u64 = Mapping::get_or_use(user_principal_borrow, user_key, 0u64);
+    let interest_due: u64 = real_debt > principal_outstanding
+        ? real_debt - principal_outstanding
+        : 0u64;
+    let interest_paid: u64 = amount > interest_due ? interest_due : amount;
+    let principal_paid: u64 = amount > interest_due ? amount - interest_due : 0u64;
+    let reserve_paid: u64 = (interest_paid * RESERVE_FACTOR) / SCALE;
+    let supplier_interest_paid: u64 = interest_paid > reserve_paid
+        ? interest_paid - reserve_paid
+        : 0u64;
     let repay_amt:    u64 = amount;
 
     // 4. Reduce user's scaled borrow position.
-    let scaled_out:   u64 = (repay_amt * INDEX_SCALE) / new_bor_idx;
+    let scaled_num:   u64 = repay_amt * INDEX_SCALE;
+    let scaled_div:   u64 = scaled_num / new_bor_idx;
+    let scaled_rem:   u64 = scaled_num % new_bor_idx;
+    let scaled_out:   u64 = scaled_rem == 0u64 ? scaled_div : scaled_div + 1u64;
     let new_scaled:   u64 = scaled_bor > scaled_out ? scaled_bor - scaled_out : 0u64;
     Mapping::set(user_scaled_borrow, user_key, new_scaled);
+    let new_principal: u64 = principal_outstanding > principal_paid
+        ? principal_outstanding - principal_paid
+        : 0u64;
+    Mapping::set(user_principal_borrow, user_key, new_principal);
 
     // 5. Update pool accounting.
-    let new_borrowed: u64 = borrowed > repay_amt ? borrowed - repay_amt : 0u64;
+    let new_borrowed: u64 = borrowed > principal_paid ? borrowed - principal_paid : 0u64;
     Mapping::set(total_borrowed,      id, new_borrowed);
     let prev_avail:   u64 = Mapping::get_or_use(available_liquidity, id, 0u64);
-    Mapping::set(available_liquidity, id, prev_avail + repay_amt);
+    Mapping::set(available_liquidity, id, prev_avail + principal_paid + supplier_interest_paid);
+    let fee_cash: u64 = Mapping::get_or_use(withdrawable_fees, id, 0u64);
+    Mapping::set(withdrawable_fees, id, fee_cash + reserve_paid);
 }
 
 // ----------------------------------------------------------------
 // FINALIZE ACCRUE — standalone index sync, no user state changes.
 // ----------------------------------------------------------------
 async function finalize_accrue() {
+    let is_initialized: bool = Mapping::get_or_use(initialized, 0field, false);
+    assert(is_initialized);
     let id: u8 = 0u8;
 
     // ---- Inlined interest accrual ----
@@ -684,10 +694,15 @@ async function finalize_withdraw_fees(
     amount:     u64,
     caller:     address
 ) {
-    assert(caller == aleo1rhgdu77hgyqd3xjj8ucu3jj9r2krwz6mnzyd80gncr5fxcwlh5rsvzp9px);
+    let is_initialized: bool = Mapping::get_or_use(initialized, 0field, false);
+    assert(is_initialized);
+    assert(caller == ADMIN_ADDRESS);
     let id: u8 = 0u8;
     let fees: u64 = Mapping::get_or_use(protocol_fees, id, 0u64);
+    let fee_cash: u64 = Mapping::get_or_use(withdrawable_fees, id, 0u64);
     assert(amount <= fees);
+    assert(amount <= fee_cash);
     Mapping::set(protocol_fees, id, fees - amount);
+    Mapping::set(withdrawable_fees, id, fee_cash - amount);
 }
 }
