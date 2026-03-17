@@ -19,16 +19,15 @@
 //   - Permissionless accrue_interest() transition
 //
 // Leo 3.x syntax:
-//   - fn + final { } blocks replace async transition + async function
-//   - Final type replaces Future
-//   - f.run() replaces f.await()
-//   - self.caller available in fn, passed to final fn as param
+//   - async transition + async function with Future values
+//   - await consumes nested futures from external program calls
+//   - self.caller available in transitions, passed to async functions as needed
 //   - @admin constructor body must be empty
 // ============================================================
 
 import credits.aleo;
 
-program lending_pool_v2.aleo {
+program lending_pool_v91.aleo {
 
     // ================================================================
     // CONSTANTS
@@ -127,13 +126,15 @@ program lending_pool_v2.aleo {
     // Call initialize() once after deployment to seed mapping values.
     // ================================================================
 
-    // @admin constructor removed for devnet testing (snarkOS version incompatibility)
+    @admin(address = "aleo1a2ehlgqhvs3p7d4hqhs0tvgk954dr8gafu9kxse2mzu9a5sqxvpsrn98pr")
+    async constructor() {}
+
     // The initialize() function still enforces admin-only access via assert.
 
     /// One-time initialisation — must be called by the admin after deploy.
-    fn initialize() -> Final {
-        assert(self.caller == aleo1rhgdu77hgyqd3xjj8ucu3jj9r2krwz6mnzyd80gncr5fxcwlh5rsvzp9px);
-        return final { finalize_initialize(); };
+    async transition initialize() -> Future {
+        assert(self.caller == aleo1a2ehlgqhvs3p7d4hqhs0tvgk954dr8gafu9kxse2mzu9a5sqxvpsrn98pr);
+        return finalize_initialize();
     }
 
     // ================================================================
@@ -143,17 +144,17 @@ program lending_pool_v2.aleo {
     // ----------------------------------------------------------------
     // 1) DEPOSIT — user sends private credits to the pool vault.
     // ----------------------------------------------------------------
-    fn deposit_with_credits(
+    async transition deposit_with_credits(
         pay_record:           credits.aleo/credits,
         public amount:        u64
-    ) -> (UserActivity, credits.aleo/credits, Final) {
+    ) -> (UserActivity, credits.aleo/credits, Future) {
         assert(amount > 0u64);
         let caller: address = self.caller;
         assert(caller == pay_record.owner);
 
         let user_key: field = BHP256::hash_to_field(caller);
 
-        let (change, f_transfer): (credits.aleo/credits, Final) =
+        let (change, f_transfer): (credits.aleo/credits, Future) =
             credits.aleo/transfer_private_to_public(pay_record, POOL_VAULT_ADDRESS, amount);
 
         let receipt: UserActivity = UserActivity {
@@ -165,15 +166,16 @@ program lending_pool_v2.aleo {
             total_repayments:  0u64,
         };
 
-        return (receipt, change, final { finalize_deposit(f_transfer, amount, user_key); });
+        let f: Future = finalize_deposit(f_transfer, amount, user_key);
+        return (receipt, change, f);
     }
 
     // ----------------------------------------------------------------
     // 2) WITHDRAW — state-only; backend sends credits from vault to user.
     // ----------------------------------------------------------------
-    fn withdraw(
+    async transition withdraw(
         public amount:        u64
-    ) -> (UserActivity, Final) {
+    ) -> (UserActivity, Future) {
         assert(amount > 0u64);
         let caller: address = self.caller;
         let user_key: field = BHP256::hash_to_field(caller);
@@ -187,15 +189,16 @@ program lending_pool_v2.aleo {
             total_repayments:  0u64,
         };
 
-        return (receipt, final { finalize_withdraw(amount, user_key); });
+        let f: Future = finalize_withdraw(amount, user_key);
+        return (receipt, f);
     }
 
     // ----------------------------------------------------------------
     // 3) BORROW — state-only; backend sends credits from vault to user.
     // ----------------------------------------------------------------
-    fn borrow(
+    async transition borrow(
         public amount:        u64
-    ) -> (UserActivity, Final) {
+    ) -> (UserActivity, Future) {
         assert(amount > 0u64);
         let caller: address = self.caller;
         let user_key: field = BHP256::hash_to_field(caller);
@@ -209,23 +212,24 @@ program lending_pool_v2.aleo {
             total_repayments:  0u64,
         };
 
-        return (receipt, final { finalize_borrow(amount, user_key); });
+        let f: Future = finalize_borrow(amount, user_key);
+        return (receipt, f);
     }
 
     // ----------------------------------------------------------------
     // 4) REPAY — user sends private credits to the pool vault.
     // ----------------------------------------------------------------
-    fn repay_with_credits(
+    async transition repay_with_credits(
         pay_record:           credits.aleo/credits,
         public amount:        u64
-    ) -> (UserActivity, credits.aleo/credits, Final) {
+    ) -> (UserActivity, credits.aleo/credits, Future) {
         assert(amount > 0u64);
         let caller: address = self.caller;
         assert(caller == pay_record.owner);
 
         let user_key: field = BHP256::hash_to_field(caller);
 
-        let (change, f_transfer): (credits.aleo/credits, Final) =
+        let (change, f_transfer): (credits.aleo/credits, Future) =
             credits.aleo/transfer_private_to_public(pay_record, POOL_VAULT_ADDRESS, amount);
 
         let receipt: UserActivity = UserActivity {
@@ -237,42 +241,42 @@ program lending_pool_v2.aleo {
             total_repayments:  amount,
         };
 
-        return (receipt, change, final { finalize_repay(f_transfer, amount, user_key); });
+        let f: Future = finalize_repay(f_transfer, amount, user_key);
+        return (receipt, change, f);
     }
 
     // ----------------------------------------------------------------
     // 5) ACCRUE INTEREST — permissionless; syncs indices without a
     //    deposit/withdraw/borrow/repay. Useful for keepers / UIs.
     // ----------------------------------------------------------------
-    fn accrue_interest() -> Final {
-        return final { finalize_accrue(); };
+    async transition accrue_interest() -> Future {
+        return finalize_accrue();
     }
 
     // ----------------------------------------------------------------
     // 6) WITHDRAW FEES — admin withdraws accumulated protocol fees.
     //    State-only; backend sends credits from vault to admin.
     // ----------------------------------------------------------------
-    fn withdraw_fees(public amount: u64) -> Final {
+    async transition withdraw_fees(public amount: u64) -> Future {
         assert(amount > 0u64);
         let caller: address = self.caller;
-        return final { finalize_withdraw_fees(amount, caller); };
+        return finalize_withdraw_fees(amount, caller);
     }
-}
 
 // ================================================================
-// FINAL FUNCTIONS (on-chain finalize logic)
+// ASYNC FUNCTIONS (on-chain finalize logic)
 //
 // Restrictions:
 //   - No variable re-assignment across if-block scope boundaries —
 //     every variable is declared exactly once via ternary expressions.
-//   - External program Finals executed via .run()
+//   - External program futures executed via await
 //   - Interest accrual fully inlined (no helper chaining).
 // ================================================================
 
 // ----------------------------------------------------------------
 // FINALIZE INITIALIZE
 // ----------------------------------------------------------------
-final fn finalize_initialize() {
+async function finalize_initialize() {
     let already: bool = Mapping::get_or_use(initialized, 0field, false);
     assert(!already);
 
@@ -293,13 +297,13 @@ final fn finalize_initialize() {
 // ----------------------------------------------------------------
 // FINALIZE DEPOSIT
 // ----------------------------------------------------------------
-final fn finalize_deposit(
-    f_transfer:    Final,
+async function finalize_deposit(
+    f_transfer:    Future,
     amount:        u64,
     user_key:      field
 ) {
     // 1. Confirm vault received the funds.
-    f_transfer.run();
+    f_transfer.await();
 
     let id: field = 0field;
 
@@ -374,7 +378,7 @@ final fn finalize_deposit(
 // ----------------------------------------------------------------
 // FINALIZE WITHDRAW
 // ----------------------------------------------------------------
-final fn finalize_withdraw(
+async function finalize_withdraw(
     amount:        u64,
     user_key:      field
 ) {
@@ -454,7 +458,7 @@ final fn finalize_withdraw(
 // ----------------------------------------------------------------
 // FINALIZE BORROW
 // ----------------------------------------------------------------
-final fn finalize_borrow(
+async function finalize_borrow(
     amount:        u64,
     user_key:      field
 ) {
@@ -531,13 +535,13 @@ final fn finalize_borrow(
 // ----------------------------------------------------------------
 // FINALIZE REPAY
 // ----------------------------------------------------------------
-final fn finalize_repay(
-    f_transfer:    Final,
+async function finalize_repay(
+    f_transfer:    Future,
     amount:        u64,
     user_key:      field
 ) {
     // 1. Confirm vault received the repaid funds.
-    f_transfer.run();
+    f_transfer.await();
 
     let id: field = 0field;
 
@@ -608,7 +612,7 @@ final fn finalize_repay(
 // ----------------------------------------------------------------
 // FINALIZE ACCRUE — standalone index sync, no user state changes.
 // ----------------------------------------------------------------
-final fn finalize_accrue() {
+async function finalize_accrue() {
     let id: field = 0field;
 
     // ---- Inlined interest accrual ----
@@ -661,7 +665,7 @@ final fn finalize_accrue() {
 // ----------------------------------------------------------------
 // FINALIZE WITHDRAW FEES
 // ----------------------------------------------------------------
-final fn finalize_withdraw_fees(
+async function finalize_withdraw_fees(
     amount:     u64,
     caller:     address
 ) {
@@ -670,4 +674,5 @@ final fn finalize_withdraw_fees(
     let fees: u64 = Mapping::get_or_use(protocol_fees, id, 0u64);
     assert(amount <= fees);
     Mapping::set(protocol_fees, id, fees - amount);
+}
 }
