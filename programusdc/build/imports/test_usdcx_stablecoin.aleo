@@ -39,3 +39,6 @@ function transfer_private:
 
 finalize transfer_private:
     assert.eq true true;
+
+constructor:
+    assert.eq program_owner aleo1a2ehlgqhvs3p7d4hqhs0tvgk954dr8gafu9kxse2mzu9a5sqxvpsrn98pr;

@@ -131,8 +131,8 @@ program lending_pool_usdce_v2.aleo {
     // Call initialize() once after deployment to seed mapping values.
     // ================================================================
 
-    // @admin constructor removed for devnet testing (snarkOS version incompatibility)
-    // The initialize() function still enforces admin-only access via assert.
+    @admin(address = "aleo1a2ehlgqhvs3p7d4hqhs0tvgk954dr8gafu9kxse2mzu9a5sqxvpsrn98pr")
+    async constructor() {}
 
     /// One-time initialisation — must be called by the admin after deploy.
     async transition initialize() -> Future {

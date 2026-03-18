@@ -558,3 +558,6 @@ finalize withdraw_fees:
     assert.eq r4 true;
     sub r3 r0 into r5;
     set r5 into protocol_fees[0field];
+
+constructor:
+    assert.eq program_owner aleo1a2ehlgqhvs3p7d4hqhs0tvgk954dr8gafu9kxse2mzu9a5sqxvpsrn98pr;

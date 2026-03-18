@@ -17,6 +17,9 @@ program test_usdcx_stablecoin.aleo {
         leaf_index: u32
     }
 
+    @admin(address = "aleo1a2ehlgqhvs3p7d4hqhs0tvgk954dr8gafu9kxse2mzu9a5sqxvpsrn98pr")
+    async constructor() {}
+
     // Mint new tokens for testing
     async transition mint(public amount: u128) -> (Token, Future) {
         return (
