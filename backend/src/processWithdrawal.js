@@ -10,10 +10,11 @@ import {
 } from '@provablehq/sdk';
 import fs from 'fs/promises';
 import { logTestnetStatus } from './checkTestnet.js';
+import { USDC_TOKEN_PROGRAM } from './config.js';
 
 const VAULT_ADDRESS = process.env.VAULT_ADDRESS;
 const VAULT_PRIVATE_KEY = process.env.VAULT_PRIVATE_KEY;
-const ALEO_RPC_URL = process.env.ALEO_RPC_URL || 'https://api.explorer.provable.com/v1';
+const ALEO_RPC_URL = process.env.ALEO_RPC_URL || 'https://testnetbeta.aleorpc.com';
 const WITHDRAW_FEE_CREDITS = Number(process.env.WITHDRAW_FEE_CREDITS || '0.2');
 
 if (!VAULT_ADDRESS || !VAULT_PRIVATE_KEY) {
@@ -101,7 +102,6 @@ export async function runWithdrawal(toAddress, amountCredits) {
 const BORROW_FEE_CREDITS = Number(process.env.BORROW_FEE_CREDITS || process.env.WITHDRAW_FEE_CREDITS || '0.2');
 
 // --- USDC pool: withdraw & borrow (vault sends USDCx via test_usdcx_stablecoin.aleo/transfer_public_to_private; no token record needed) ---
-const USDC_TOKEN_PROGRAM = 'test_usdcx_stablecoin.aleo';
 const USDC_DECIMALS = 6;
 const USDC_SCALE = 10 ** USDC_DECIMALS; // 1_000_000 — convert u64 (human) to 6-decimal amount for transfer
 const USDC_WITHDRAW_FEE_CREDITS = Number(process.env.USDC_WITHDRAW_FEE_CREDITS || process.env.WITHDRAW_FEE_CREDITS || '0.2');

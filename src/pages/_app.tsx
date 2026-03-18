@@ -21,6 +21,7 @@ import '@provablehq/aleo-wallet-adaptor-react-ui/dist/styles.css';
 import '@/assets/css/globals.css';
 
 import { CURRENT_NETWORK, CURRENT_RPC_URL } from '@/types';
+import { ALL_PROGRAMS } from '@/config/programs';
 import { WalletPersistence } from '@/components/WalletPersistence';
 
 // Initialize the wallet adapters outside the component
@@ -51,7 +52,7 @@ function CustomApp({ Component, pageProps }: AppPropsWithLayout) {
             // decrypt records (e.g. for UserActivity) after the first approval.
             decryptPermission={DecryptPermission.AutoDecrypt}
             // Programs this dApp will interact with via executeTransaction/requestRecords
-            programs={['lending_pool_v86.aleo', 'lending_pool_usdce_v86.aleo', 'test_usdcx_stablecoin.aleo', 'credits.aleo']}
+            programs={ALL_PROGRAMS}
             onError={(error) => console.error(error.message)}
           >
             <WalletPersistence>

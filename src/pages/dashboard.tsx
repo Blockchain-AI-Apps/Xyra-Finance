@@ -35,6 +35,7 @@ import {
   computeUsdcPoolAPY,
   getAleoPoolUserEffectivePosition,
   getPrivateCreditsBalance,
+  getPublicCreditsBalance,
 } from '@/components/aleo/rpc';
 import { frontendLogger } from '@/utils/logger';
 import { CURRENT_NETWORK } from '@/types';
@@ -123,6 +124,7 @@ const DashboardPage: NextPageWithLayout = () => {
   const [isRefreshingState, setIsRefreshingState] = useState<boolean>(false);
   const [amountError, setAmountError] = useState<string | null>(null);
   const [privateAleoBalance, setPrivateAleoBalance] = useState<number | null>(null);
+  const [publicAleoBalance, setPublicAleoBalance] = useState<number | null>(null);
 
   // USDC Pool state (lending_pool_usdce_v86.aleo — v86 interest/APY, effective balances)
   const [totalSuppliedUsdc, setTotalSuppliedUsdc] = useState<string | null>(null);
@@ -635,6 +637,9 @@ const DashboardPage: NextPageWithLayout = () => {
           if (requestRecords) {
             getPrivateCreditsBalance(requestRecords, decrypt).then(setPrivateAleoBalance).catch(() => setPrivateAleoBalance(null));
           }
+          if (publicKey) {
+            getPublicCreditsBalance(publicKey).then(setPublicAleoBalance).catch(() => setPublicAleoBalance(null));
+          }
         } catch (error) {
           console.warn('Failed to refresh user position from records:', error);
           setUserSupplied('0');
@@ -656,6 +661,7 @@ const DashboardPage: NextPageWithLayout = () => {
         setEffectiveUserSupplied(null);
         setEffectiveUserBorrowed(null);
         setPrivateAleoBalance(null);
+        setPublicAleoBalance(null);
       }
     } catch (e) {
       console.error('Failed to fetch pool state', e);
@@ -2041,8 +2047,8 @@ const DashboardPage: NextPageWithLayout = () => {
                         <td className="text-base-content/90">
                           {walletBalancesLoading ? (
                             <span className="loading loading-spinner loading-xs text-base-content/60" />
-                          ) : privateAleoBalance != null ? (
-                            privateAleoBalance.toFixed(4)
+                          ) : (privateAleoBalance != null || publicAleoBalance != null) ? (
+                            ((privateAleoBalance ?? 0) + (publicAleoBalance ?? 0)).toFixed(4)
                           ) : (
                             '—'
                           )}
@@ -2061,7 +2067,7 @@ const DashboardPage: NextPageWithLayout = () => {
                               loading ||
                               !connected ||
                               walletBalancesLoading ||
-                              (privateAleoBalance ?? 0) <= 0
+                              ((privateAleoBalance ?? 0) + (publicAleoBalance ?? 0)) <= 0
                             }
                           >
                             Supply

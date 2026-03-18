@@ -1,6 +1,9 @@
 import type { NextPage } from 'next';
 import type { ReactElement, ReactNode } from 'react';
 import { Network } from '@provablehq/aleo-types';
+import { PROGRAMS } from '@/config/programs';
+
+export { PROGRAMS, ALL_PROGRAMS } from '@/config/programs';
 
 //Change to Network.MAINNET for mainnet or Network.TESTNET for testnet
 export const CURRENT_NETWORK: Network = Network.TESTNET;
@@ -37,11 +40,7 @@ export type BountyData = {
   proposals?: ProposalData[];
 };
 
-// Aleo program ID for the first lending pool (lending_pool_v86: micro-ALEO amounts, real interest/APY, on-chain block.height).
-export const BOUNTY_PROGRAM_ID = 'lending_pool_v86.aleo';
-
-// USDC pool program: lending_pool_usdce_v86.aleo — v86-style interest/APY, on-chain block.height, scaled balances.
-export const USDC_POOL_PROGRAM_ID = 'lending_pool_usdce_v86.aleo';
-
-// USDCx token program (Provable testnet): required for Token records used in USDC pool deposit/repay/withdraw/borrow.
-export const USDC_TOKEN_PROGRAM_ID = 'test_usdcx_stablecoin.aleo';
+// Backward-compatible aliases — prefer importing PROGRAMS from '@/config/programs' directly.
+export const BOUNTY_PROGRAM_ID = PROGRAMS.LENDING_POOL;
+export const USDC_POOL_PROGRAM_ID = PROGRAMS.USDC_POOL;
+export const USDC_TOKEN_PROGRAM_ID = PROGRAMS.USDC_TOKEN;

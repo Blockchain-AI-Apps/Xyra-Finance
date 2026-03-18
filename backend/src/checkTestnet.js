@@ -1,7 +1,7 @@
 import 'dotenv/config';
 import fetch from 'node-fetch';
 
-const ALEO_RPC_URL = process.env.ALEO_RPC_URL || 'https://api.explorer.provable.com/v1';
+const ALEO_RPC_URL = process.env.ALEO_RPC_URL || 'https://testnetbeta.aleorpc.com';
 
 /**
  * Verify backend can reach the Aleo testnet (Provable RPC).
@@ -73,7 +73,7 @@ export async function checkTestnetConnection() {
  * Log testnet connection status to console.
  */
 export async function logTestnetStatus() {
-  const ALEO_RPC_URL = process.env.ALEO_RPC_URL || 'https://api.explorer.provable.com/v1';
+  const ALEO_RPC_URL = process.env.ALEO_RPC_URL || 'https://testnetbeta.aleorpc.com';
   console.log('🔗 Checking testnet connection...');
   console.log('   RPC URL:', ALEO_RPC_URL);
   const result = await checkTestnetConnection();

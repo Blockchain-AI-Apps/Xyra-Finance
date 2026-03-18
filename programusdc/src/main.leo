@@ -24,10 +24,9 @@
 //   - Permissionless accrue_interest() transition
 //
 // Leo 3.x syntax:
-//   - fn + final { } blocks replace async transition + async function
-//   - Final type replaces Future
-//   - f.run() replaces f.await()
-//   - self.caller available in fn, passed to final fn as param
+//   - async transition + async function with Future values
+//   - await consumes nested futures from external program calls
+//   - self.caller available in transitions, passed to async functions as needed
 //   - @admin constructor body must be empty
 // ============================================================
 
@@ -136,9 +135,9 @@ program lending_pool_usdce_v2.aleo {
     // The initialize() function still enforces admin-only access via assert.
 
     /// One-time initialisation — must be called by the admin after deploy.
-    fn initialize() -> Final {
+    async transition initialize() -> Future {
         assert(self.caller == aleo1rhgdu77hgyqd3xjj8ucu3jj9r2krwz6mnzyd80gncr5fxcwlh5rsvzp9px);
-        return final { finalize_initialize(); };
+        return finalize_initialize();
     }
 
     // ================================================================
@@ -148,11 +147,11 @@ program lending_pool_usdce_v2.aleo {
     // ----------------------------------------------------------------
     // 1) DEPOSIT — user sends private USDCx to the pool vault.
     // ----------------------------------------------------------------
-    fn deposit(
+    async transition deposit(
         token:                test_usdcx_stablecoin.aleo/Token,
         public amount:        u64,
         proofs:               [test_usdcx_stablecoin.aleo/MerkleProof; 2]
-    ) -> (UserActivity, test_usdcx_stablecoin.aleo/Token, test_usdcx_stablecoin.aleo/Token, Final) {
+    ) -> (UserActivity, test_usdcx_stablecoin.aleo/Token, test_usdcx_stablecoin.aleo/Token, Future) {
         assert(amount > 0u64);
         let caller: address = self.caller;
         assert(caller == token.owner);
@@ -162,7 +161,7 @@ program lending_pool_usdce_v2.aleo {
 
         let user_key: field = BHP256::hash_to_field(caller);
 
-        let (compliance_out, to_pool, to_user, f_transfer): (test_usdcx_stablecoin.aleo/ComplianceRecord, test_usdcx_stablecoin.aleo/Token, test_usdcx_stablecoin.aleo/Token, Final) =
+        let (compliance_out, to_pool, to_user, f_transfer): (test_usdcx_stablecoin.aleo/ComplianceRecord, test_usdcx_stablecoin.aleo/Token, test_usdcx_stablecoin.aleo/Token, Future) =
             test_usdcx_stablecoin.aleo/transfer_private(POOL_VAULT_ADDRESS, amount_u128, token, proofs);
 
         let receipt: UserActivity = UserActivity {
@@ -174,17 +173,18 @@ program lending_pool_usdce_v2.aleo {
             total_repayments:  0u64,
         };
 
-        return (receipt, to_pool, to_user, final { finalize_deposit(f_transfer, amount, user_key); });
+        let f: Future = finalize_deposit(f_transfer, amount, user_key);
+        return (receipt, to_pool, to_user, f);
     }
 
     // ----------------------------------------------------------------
     // 2) REPAY — user sends private USDCx to the pool vault.
     // ----------------------------------------------------------------
-    fn repay(
+    async transition repay(
         token:                test_usdcx_stablecoin.aleo/Token,
         public amount:        u64,
         proofs:               [test_usdcx_stablecoin.aleo/MerkleProof; 2]
-    ) -> (UserActivity, test_usdcx_stablecoin.aleo/Token, test_usdcx_stablecoin.aleo/Token, Final) {
+    ) -> (UserActivity, test_usdcx_stablecoin.aleo/Token, test_usdcx_stablecoin.aleo/Token, Future) {
         assert(amount > 0u64);
         let caller: address = self.caller;
         assert(caller == token.owner);
@@ -194,7 +194,7 @@ program lending_pool_usdce_v2.aleo {
 
         let user_key: field = BHP256::hash_to_field(caller);
 
-        let (compliance_out, to_pool, to_user, f_transfer): (test_usdcx_stablecoin.aleo/ComplianceRecord, test_usdcx_stablecoin.aleo/Token, test_usdcx_stablecoin.aleo/Token, Final) =
+        let (compliance_out, to_pool, to_user, f_transfer): (test_usdcx_stablecoin.aleo/ComplianceRecord, test_usdcx_stablecoin.aleo/Token, test_usdcx_stablecoin.aleo/Token, Future) =
             test_usdcx_stablecoin.aleo/transfer_private(POOL_VAULT_ADDRESS, amount_u128, token, proofs);
 
         let receipt: UserActivity = UserActivity {
@@ -206,15 +206,16 @@ program lending_pool_usdce_v2.aleo {
             total_repayments:  amount,
         };
 
-        return (receipt, to_pool, to_user, final { finalize_repay(f_transfer, amount, user_key); });
+        let f: Future = finalize_repay(f_transfer, amount, user_key);
+        return (receipt, to_pool, to_user, f);
     }
 
     // ----------------------------------------------------------------
     // 3) WITHDRAW — state-only; backend sends USDCx from vault to user.
     // ----------------------------------------------------------------
-    fn withdraw(
+    async transition withdraw(
         public amount:        u64
-    ) -> (UserActivity, Final) {
+    ) -> (UserActivity, Future) {
         assert(amount > 0u64);
         let caller: address = self.caller;
         let user_key: field = BHP256::hash_to_field(caller);
@@ -228,15 +229,16 @@ program lending_pool_usdce_v2.aleo {
             total_repayments:  0u64,
         };
 
-        return (receipt, final { finalize_withdraw(amount, user_key); });
+        let f: Future = finalize_withdraw(amount, user_key);
+        return (receipt, f);
     }
 
     // ----------------------------------------------------------------
     // 4) BORROW — state-only; backend sends USDCx from vault to user.
     // ----------------------------------------------------------------
-    fn borrow(
+    async transition borrow(
         public amount:        u64
-    ) -> (UserActivity, Final) {
+    ) -> (UserActivity, Future) {
         assert(amount > 0u64);
         let caller: address = self.caller;
         let user_key: field = BHP256::hash_to_field(caller);
@@ -250,42 +252,42 @@ program lending_pool_usdce_v2.aleo {
             total_repayments:  0u64,
         };
 
-        return (receipt, final { finalize_borrow(amount, user_key); });
+        let f: Future = finalize_borrow(amount, user_key);
+        return (receipt, f);
     }
 
     // ----------------------------------------------------------------
     // 5) ACCRUE INTEREST — permissionless; syncs indices without a
     //    deposit/withdraw/borrow/repay. Useful for keepers / UIs.
     // ----------------------------------------------------------------
-    fn accrue_interest() -> Final {
-        return final { finalize_accrue(); };
+    async transition accrue_interest() -> Future {
+        return finalize_accrue();
     }
 
     // ----------------------------------------------------------------
     // 6) WITHDRAW FEES — admin withdraws accumulated protocol fees.
     //    State-only: backend reads event and sends USDCx separately.
     // ----------------------------------------------------------------
-    fn withdraw_fees(public amount: u64) -> Final {
+    async transition withdraw_fees(public amount: u64) -> Future {
         assert(amount > 0u64);
         let caller: address = self.caller;
-        return final { finalize_withdraw_fees(amount, caller); };
+        return finalize_withdraw_fees(amount, caller);
     }
-}
 
 // ================================================================
-// FINAL FUNCTIONS (on-chain finalize logic)
+// ASYNC FUNCTIONS (on-chain finalize logic)
 //
 // Restrictions:
 //   - No variable re-assignment across if-block scope boundaries —
 //     every variable is declared exactly once via ternary expressions.
-//   - External program Finals executed via .run()
+//   - External program futures executed via await
 //   - Interest accrual fully inlined (no helper chaining).
 // ================================================================
 
 // ----------------------------------------------------------------
 // FINALIZE INITIALIZE
 // ----------------------------------------------------------------
-final fn finalize_initialize() {
+async function finalize_initialize() {
     let already: bool = Mapping::get_or_use(initialized, 0field, false);
     assert(!already);
 
@@ -306,13 +308,13 @@ final fn finalize_initialize() {
 // ----------------------------------------------------------------
 // FINALIZE DEPOSIT
 // ----------------------------------------------------------------
-final fn finalize_deposit(
-    f_transfer:    Final,
+async function finalize_deposit(
+    f_transfer:    Future,
     amount:        u64,
     user_key:      field
 ) {
     // 1. Confirm vault received the funds.
-    f_transfer.run();
+    f_transfer.await();
 
     let id: field = 0field;
 
@@ -385,9 +387,9 @@ final fn finalize_deposit(
 }
 
 // ----------------------------------------------------------------
-// FINALIZE WITHDRAW  (state-only — no f_transfer, no .run())
+// FINALIZE WITHDRAW  (state-only — no f_transfer, no .await())
 // ----------------------------------------------------------------
-final fn finalize_withdraw(
+async function finalize_withdraw(
     amount:        u64,
     user_key:      field
 ) {
@@ -465,9 +467,9 @@ final fn finalize_withdraw(
 }
 
 // ----------------------------------------------------------------
-// FINALIZE BORROW  (state-only — no f_transfer, no .run())
+// FINALIZE BORROW  (state-only — no f_transfer, no .await())
 // ----------------------------------------------------------------
-final fn finalize_borrow(
+async function finalize_borrow(
     amount:        u64,
     user_key:      field
 ) {
@@ -544,13 +546,13 @@ final fn finalize_borrow(
 // ----------------------------------------------------------------
 // FINALIZE REPAY
 // ----------------------------------------------------------------
-final fn finalize_repay(
-    f_transfer:    Final,
+async function finalize_repay(
+    f_transfer:    Future,
     amount:        u64,
     user_key:      field
 ) {
     // 1. Confirm vault received the repaid funds.
-    f_transfer.run();
+    f_transfer.await();
 
     let id: field = 0field;
 
@@ -621,7 +623,7 @@ final fn finalize_repay(
 // ----------------------------------------------------------------
 // FINALIZE ACCRUE — standalone index sync, no user state changes.
 // ----------------------------------------------------------------
-final fn finalize_accrue() {
+async function finalize_accrue() {
     let id: field = 0field;
 
     // ---- Inlined interest accrual ----
@@ -672,9 +674,9 @@ final fn finalize_accrue() {
 }
 
 // ----------------------------------------------------------------
-// FINALIZE WITHDRAW FEES  (state-only — no f_transfer, no .run())
+// FINALIZE WITHDRAW FEES  (state-only — no f_transfer, no .await())
 // ----------------------------------------------------------------
-final fn finalize_withdraw_fees(
+async function finalize_withdraw_fees(
     amount: u64,
     caller: address
 ) {
@@ -683,4 +685,5 @@ final fn finalize_withdraw_fees(
     let fees: u64 = Mapping::get_or_use(protocol_fees, id, 0u64);
     assert(amount <= fees);
     Mapping::set(protocol_fees, id, fees - amount);
+}
 }

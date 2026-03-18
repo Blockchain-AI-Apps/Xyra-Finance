@@ -1,5 +1,6 @@
 import { JSONRPCClient } from 'json-rpc-2.0';
-import { BOUNTY_PROGRAM_ID, USDC_POOL_PROGRAM_ID, USDC_TOKEN_PROGRAM_ID, CURRENT_NETWORK, CURRENT_RPC_URL } from '@/types';
+import { CURRENT_NETWORK, CURRENT_RPC_URL } from '@/types';
+import { PROGRAMS } from '@/config/programs';
 import { Network } from '@provablehq/aleo-types';
 import { frontendLogger } from '@/utils/logger';
 import { TREASURY_ADDRESS, getTreasuryRequestMessage } from '@/config/treasury';
@@ -8,9 +9,9 @@ import { TREASURY_ADDRESS, getTreasuryRequestMessage } from '@/config/treasury';
 // We'll use dynamic import when needed, or fall back to contract call method
 
 // For clarity, alias the lending pool program IDs.
-export const LENDING_POOL_PROGRAM_ID = BOUNTY_PROGRAM_ID;
-export const USDC_LENDING_POOL_PROGRAM_ID = USDC_POOL_PROGRAM_ID;
-export const CREDITS_PROGRAM_ID = 'credits.aleo';
+export const LENDING_POOL_PROGRAM_ID = PROGRAMS.LENDING_POOL;
+export const USDC_LENDING_POOL_PROGRAM_ID = PROGRAMS.USDC_POOL;
+export const CREDITS_PROGRAM_ID = PROGRAMS.CREDITS;
 
 /**
  * Debug function to diagnose what records are available in the wallet
@@ -489,9 +490,30 @@ export async function getPrivateCreditsBalance(
 }
 
 /**
+ * Get public Aleo balance for an address from the credits.aleo/account mapping.
+ * Returns balance in credits (not microcredits). Returns 0 if no public balance or on error.
+ */
+export async function getPublicCreditsBalance(address: string): Promise<number> {
+  try {
+    const result = await client.request('getMappingValue', {
+      programId: CREDITS_PROGRAM_ID,
+      mappingName: 'account',
+      key: address,
+    });
+    // Value is returned as a string like "20000000u64" (microcredits)
+    const raw = String(result?.value ?? result ?? '0');
+    const micro = parseInt(raw.replace(/\D/g, ''), 10) || 0;
+    return micro / 1_000_000;
+  } catch {
+    // No entry in mapping means 0 public balance
+    return 0;
+  }
+}
+
+/**
  * Deposit into the lending pool using a real `credits.aleo/credits` record.
  *
- * Contract: lending_pool_v86.aleo
+ * Contract: lending_pool_v91.aleo
  *   async transition deposit_with_credits(
  *     pay_record: credits.aleo/credits,
  *     public amount: u64
@@ -756,7 +778,7 @@ export async function lendingBorrow(
 /**
  * Repay to the lending pool using a real `credits.aleo/credits` record.
  *
- * Contract: lending_pool_v86.aleo
+ * Contract: lending_pool_v91.aleo
  *   async transition repay_with_credits(
  *     pay_record: credits.aleo/credits,
  *     public amount: u64
@@ -990,7 +1012,7 @@ export async function lendingWithdraw(
 // - deposit/repay: 3 inputs — token, amount (micro-USDC), proofs. Block height is read on-chain.
 // - withdraw/borrow: 1 input — amount (micro-USDC). Backend sends USDCx from vault to user.
 // Amount in program is micro-USDC (1 USDC = 1_000_000). RPC accepts human USDC and converts to micro for transitions.
-const USDC_TOKEN_PROGRAM = USDC_TOKEN_PROGRAM_ID;
+const USDC_TOKEN_PROGRAM = PROGRAMS.USDC_TOKEN;
 
 /**
  * Placeholder [MerkleProof; 2] matching wallet format: leaf_index 1u32, 16 siblings per proof.
@@ -1599,7 +1621,7 @@ export async function getLendingPoolStateForProgram(programId: string): Promise<
   liquidityIndex: string | null;
   borrowIndex: string | null;
 }> {
-  const key = '0u8';
+  const key = '0field';
 
   try {
     const requestWithErrorHandling = async (mappingName: string) => {
@@ -1616,11 +1638,11 @@ export async function getLendingPoolStateForProgram(programId: string): Promise<
     };
 
     const [supplied, borrowed, utilization, interest, liquidityIdx, borrowIdx] = await Promise.all([
-      requestWithErrorHandling('total_supplied'),
+      requestWithErrorHandling('total_deposited'),
       requestWithErrorHandling('total_borrowed'),
-      requestWithErrorHandling('utilization_index'),
-      requestWithErrorHandling('interest_index'),
-      requestWithErrorHandling('liquidity_index'),
+      requestWithErrorHandling('available_liquidity'),
+      requestWithErrorHandling('last_accrual_block'),
+      requestWithErrorHandling('supply_index'),
       requestWithErrorHandling('borrow_index'),
     ]);
 
@@ -1654,7 +1676,7 @@ export async function getLendingPoolStateForProgram(programId: string): Promise<
 }
 
 /**
- * Read global pool state for the Aleo pool (lending_pool_v86.aleo).
+ * Read global pool state for the Aleo pool (lending_pool_v91.aleo).
  */
 export async function getLendingPoolState(): Promise<{
   totalSupplied: string | null;
@@ -1681,7 +1703,7 @@ export async function getUsdcLendingPoolState(): Promise<{
   return getLendingPoolStateForProgram(USDC_LENDING_POOL_PROGRAM_ID);
 }
 
-// --- v86 interest/APY constants (match program lending_pool_v86.aleo) ---
+// --- v86 interest/APY constants (match program lending_pool_v91.aleo) ---
 const INDEX_SCALE_ALEO = 1_000_000_000_000; // 1e12
 const SCALE_ALEO = 1_000_000; // 1e6
 const BASE_RATE_PER_BLOCK_ALEO = 1000;
@@ -1751,11 +1773,11 @@ export async function getAleoPoolUserEffectivePosition(
         return null;
       }
     };
-    const globalKey = '0u8';
+    const globalKey = '0field';
     const [scaledSupply, scaledBorrow, liquidityIndex, borrowIndex] = await Promise.all([
       requestWithErrorHandling('user_scaled_supply', userHash),
       requestWithErrorHandling('user_scaled_borrow', userHash),
-      requestWithErrorHandling('liquidity_index', globalKey),
+      requestWithErrorHandling('supply_index', globalKey),
       requestWithErrorHandling('borrow_index', globalKey),
     ]);
     const li = liquidityIndex ?? BigInt(INDEX_SCALE_ALEO);

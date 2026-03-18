@@ -18,29 +18,28 @@ program test_usdcx_stablecoin.aleo {
     }
 
     // Mint new tokens for testing
-    fn mint(public amount: u128) -> (Token, Final) {
+    async transition mint(public amount: u128) -> (Token, Future) {
         return (
             Token { owner: self.caller, amount: amount },
-            final { finalize_mint(); }
+            finalize_mint()
         );
     }
 
-    // Leo 3.x: fn + Final return + final { } block
-    fn transfer_private(
+    async transition transfer_private(
         public recipient: address,
         public amount: u128,
         input_record: Token,
         proofs: [MerkleProof; 2]
-    ) -> (ComplianceRecord, Token, Token, Final) {
+    ) -> (ComplianceRecord, Token, Token, Future) {
         return (
             ComplianceRecord { owner: recipient, compliance_hash: 0field },
             Token { owner: recipient, amount: amount },
             Token { owner: self.caller, amount: input_record.amount - amount },
-            final { finalize_transfer_private(); }
+            finalize_transfer_private()
         );
     }
+
+    async function finalize_mint() {}
+
+    async function finalize_transfer_private() {}
 }
-
-final fn finalize_mint() {}
-
-final fn finalize_transfer_private() {}

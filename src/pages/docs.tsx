@@ -116,7 +116,7 @@ const DocsPage: NextPageWithLayout = () => {
           <ul className="list-disc list-inside space-y-1">
             <li>
               <span className="font-semibold">Aleo pool program</span>{' '}
-              (<span className="font-mono">lending_pool_v86.aleo</span>): handles ALEO deposits, withdraws,
+              (<span className="font-mono">lending_pool_v91.aleo</span>): handles ALEO deposits, withdraws,
               borrows, and repays. Program id is configured in{' '}
               <span className="font-mono">src/types/index.ts</span> as{' '}
               <span className="font-mono">BOUNTY_PROGRAM_ID</span>, and the Leo source lives in{' '}
