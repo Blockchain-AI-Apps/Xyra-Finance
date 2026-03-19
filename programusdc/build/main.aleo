@@ -1,8 +1,5 @@
-import merkle_tree.aleo;
-import test_usdcx_multisig_core.aleo;
-import test_usdcx_freezelist.aleo;
 import test_usdcx_stablecoin.aleo;
-program lending_pool_usdce_v86.aleo;
+program lending_pool_usdce_v2.aleo;
 
 record UserActivity:
     owner as address.private;
@@ -10,20 +7,6 @@ record UserActivity:
     total_withdrawals as u64.private;
     total_borrows as u64.private;
     total_repayments as u64.private;
-
-struct MerkleProof:
-    siblings as [field; 16u32];
-    leaf_index as u32;
-
-struct WalletEcdsaSigner:
-    wallet_id as address;
-    ecdsa_signer as [u8; 20u32];
-
-struct AdminOp:
-    op as u8;
-    threshold as u8;
-    aleo_signer as address;
-    ecdsa_signer as [u8; 20u32];
 
 mapping total_supplied:
     key as u8.public;
@@ -77,7 +60,7 @@ function deposit:
     input r0 as test_usdcx_stablecoin.aleo/Token.record;
     input r1 as u64.public;
     input r2 as u64.public;
-    input r3 as [MerkleProof; 2u32].private;
+    input r3 as [test_usdcx_stablecoin.aleo/MerkleProof; 2u32].private;
     gt r1 0u64 into r4;
     assert.eq r4 true;
     is.eq self.caller r0.owner into r5;
@@ -92,7 +75,7 @@ function deposit:
     output r13 as UserActivity.record;
     output r11 as test_usdcx_stablecoin.aleo/Token.record;
     output r10 as test_usdcx_stablecoin.aleo/Token.record;
-    output r14 as lending_pool_usdce_v86.aleo/deposit.future;
+    output r14 as lending_pool_usdce_v2.aleo/deposit.future;
 
 finalize deposit:
     input r0 as u64.public;
@@ -207,7 +190,7 @@ function repay:
     input r0 as test_usdcx_stablecoin.aleo/Token.record;
     input r1 as u64.public;
     input r2 as u64.public;
-    input r3 as [MerkleProof; 2u32].private;
+    input r3 as [test_usdcx_stablecoin.aleo/MerkleProof; 2u32].private;
     gt r1 0u64 into r4;
     assert.eq r4 true;
     is.eq self.caller r0.owner into r5;
@@ -222,7 +205,7 @@ function repay:
     output r13 as UserActivity.record;
     output r11 as test_usdcx_stablecoin.aleo/Token.record;
     output r10 as test_usdcx_stablecoin.aleo/Token.record;
-    output r14 as lending_pool_usdce_v86.aleo/repay.future;
+    output r14 as lending_pool_usdce_v2.aleo/repay.future;
 
 finalize repay:
     input r0 as u64.public;
@@ -314,7 +297,7 @@ function withdraw:
     cast self.caller 0u64 r0 0u64 0u64 into r4 as UserActivity.record;
     async withdraw r0 r3 r1 into r5;
     output r4 as UserActivity.record;
-    output r5 as lending_pool_usdce_v86.aleo/withdraw.future;
+    output r5 as lending_pool_usdce_v2.aleo/withdraw.future;
 
 finalize withdraw:
     input r0 as u64.public;
@@ -424,7 +407,7 @@ function borrow:
     cast self.caller 0u64 0u64 r0 0u64 into r4 as UserActivity.record;
     async borrow r0 r3 r1 into r5;
     output r4 as UserActivity.record;
-    output r5 as lending_pool_usdce_v86.aleo/borrow.future;
+    output r5 as lending_pool_usdce_v2.aleo/borrow.future;
 
 finalize borrow:
     input r0 as u64.public;
@@ -522,7 +505,7 @@ finalize borrow:
 function accrue_interest:
     input r0 as u64.public;
     async accrue_interest r0 into r1;
-    output r1 as lending_pool_usdce_v86.aleo/accrue_interest.future;
+    output r1 as lending_pool_usdce_v2.aleo/accrue_interest.future;
 
 finalize accrue_interest:
     input r0 as u64.public;
@@ -574,7 +557,7 @@ function get_user_activity:
     cast self.caller 0u64 0u64 0u64 0u64 into r1 as UserActivity.record;
     async get_user_activity r0 into r2;
     output r1 as UserActivity.record;
-    output r2 as lending_pool_usdce_v86.aleo/get_user_activity.future;
+    output r2 as lending_pool_usdce_v2.aleo/get_user_activity.future;
 
 finalize get_user_activity:
     input r0 as field.public;

@@ -7,3 +7,21 @@ program/build
 program/backup
 Docs
 scripts/*.sh
+
+# Aleo local devnet ledger & node data
+.ledger-*/
+.node-data-*/
+
+# Aleo devnet logs
+devnet-*.log
+
+# Leo build artifacts
+programusdc/build/
+programusdc/imports/test_usdcx_stablecoin/
+programusdc/inputs/deposit.in
+
+# TypeScript build info
+tsconfig.tsbuildinfo
+
+# Misc text files
+earlier_build_test_stablecoin.txt

@@ -6,7 +6,7 @@
 
 import test_usdcx_stablecoin.aleo;
 
-program lending_pool_usdce_v86.aleo {
+program lending_pool_usdce_v2.aleo {
     // ---- Constants ----
     // SCALE is the fixed-point scale for utilization/interest calculations (1e6).
     // All pool amounts (totals, user totals, amounts) are stored in micro-USDC (1 USDC = 1_000_000 units).
@@ -59,7 +59,7 @@ program lending_pool_usdce_v86.aleo {
         token: test_usdcx_stablecoin.aleo/Token,
         public amount: u64,
         public current_block: u64,
-        proofs: [MerkleProof; 2]
+        proofs: [test_usdcx_stablecoin.aleo/MerkleProof; 2]
     ) -> (UserActivity, test_usdcx_stablecoin.aleo/Token, test_usdcx_stablecoin.aleo/Token, Future) {
         let caller: address = self.caller;
         assert(amount > 0u64);
@@ -92,7 +92,7 @@ program lending_pool_usdce_v86.aleo {
         token: test_usdcx_stablecoin.aleo/Token,
         public amount: u64,
         public current_block: u64,
-        proofs: [MerkleProof; 2]
+        proofs: [test_usdcx_stablecoin.aleo/MerkleProof; 2]
     ) -> (UserActivity, test_usdcx_stablecoin.aleo/Token, test_usdcx_stablecoin.aleo/Token, Future) {
         let caller: address = self.caller;
         assert(amount > 0u64);
