@@ -94,7 +94,17 @@ record UserActivity {
 
 ### 1. `initialize()`
 
-Admin-only (POOL_VAULT_ADDRESS). Sets all indices to `INDEX_SCALE`, all totals to 0, APYs to 200 (2%). Guarded by `initialized` mapping — can only run once.
+Vault-address-only (caller must be `POOL_VAULT_ADDRESS`). Sets all indices to `INDEX_SCALE`, all totals to 0, APYs to 200 (2%). Guarded by `initialized` mapping — can only run once.
+
+```
+Transition logic:
+  1. Assert self.caller == POOL_VAULT_ADDRESS
+Finalize logic:
+  1. Assert initialized[0field] == false
+  2. Set supply_index = INDEX_SCALE, borrow_index = INDEX_SCALE
+  3. Set all totals to 0, APYs to 200
+  4. Set initialized = true
+```
 
 ### 2. `deposit(token, amount, proofs)`
 
@@ -104,7 +114,8 @@ Inputs:
   - amount: u64 (public)
   - proofs: [MerkleProof; 2]
 
-Outputs:
+Outputs (5 values):
+  - ComplianceRecord (from transfer_private — must be output, records cannot be dropped in Leo)
   - UserActivity record (asset_id=1field, total_deposits=amount)
   - Token (change back to user)
   - Token (sent to pool vault)
@@ -114,6 +125,8 @@ Transition logic:
   1. Assert amount > 0, caller == token.owner
   2. Cast amount to u128, assert token.amount >= amount_u128
   3. Call test_usdcx_stablecoin.aleo/transfer_private(POOL_VAULT, amount_u128, token, proofs)
+     → returns (ComplianceRecord, Token to_user, Token to_pool, Future)
+     NOTE: transfer_private takes amount as PRIVATE; the pool's public amount param is separate
   4. Hash caller to user_hash
 
 Finalize logic:
@@ -126,6 +139,8 @@ Finalize logic:
 ```
 
 ### 3. `withdraw(amount)`
+
+State-only transition. The user's withdrawal is recorded on-chain; the backend/vault service watches the mapping changes and sends USDCx from the vault to the user off-chain (same pattern as v91 for credits).
 
 ```
 Inputs:
@@ -149,6 +164,8 @@ Finalize logic:
 ```
 
 ### 4. `borrow(amount)`
+
+State-only transition. The user's borrow is recorded on-chain; the backend/vault service watches the mapping changes and sends USDCx from the vault to the user off-chain (same pattern as v91 for credits).
 
 ```
 Inputs:
@@ -179,7 +196,8 @@ Inputs:
   - amount: u64 (public)
   - proofs: [MerkleProof; 2]
 
-Outputs:
+Outputs (5 values):
+  - ComplianceRecord (from transfer_private — must be output, records cannot be dropped in Leo)
   - UserActivity record (asset_id=1field, total_repayments=amount)
   - Token (change back to user)
   - Token (sent to pool vault)
@@ -202,7 +220,7 @@ No inputs. Runs the accrual block only. Any wallet can call to sync indices.
 
 ### 7. `withdraw_fees(amount)`
 
-Admin-only. Deducts `amount` from `protocol_fees` mapping. Admin check via `assert(self.caller == ADMIN_ADDRESS)` in finalize.
+Admin-only. Deducts `amount` from `protocol_fees` mapping. The transition passes `self.caller` as an async parameter to finalize, where `assert(caller == ADMIN_ADDRESS)` is enforced on-chain (matching v91 pattern — `self.caller` is not available in finalize, so it must be forwarded).
 
 ## Interest Accrual Block (shared by all finalize functions)
 
@@ -214,35 +232,53 @@ lub = last_accrual_block (default 0)
 delta = current_block > lub ? current_block - lub : 0
 effective_delta = delta > 1000 ? 1000 : delta
 
-if effective_delta > 0 AND total_deposited > 0:
-    safe_deposited = total_deposited == 0 ? 1 : total_deposited
-    util_bps = (total_borrowed * 10000) / safe_deposited  // 0 if deposited==0
-    util_bps = total_deposited == 0 ? 0 : util_bps
+// IMPORTANT: These values are ALWAYS computed (even when pool is empty).
+// v91 uses ternary to conditionally apply them, not if/else blocks.
+should_accrue = effective_delta > 0            // r15 in v91
+has_deposits = total_deposited > 0             // r16 in v91
+should_update_indices = should_accrue AND has_deposits  // r17 in v91
 
-    // Borrow rate (annual, in BPS): 200 + 400 * util_bps / 10000
-    borrow_rate_annual = 200 + (400 * util_bps) / 10000
+// Utilization (safe division)
+safe_deposited = total_deposited == 0 ? 1 : total_deposited
+util_bps = (total_borrowed * 10000) / safe_deposited
+util_bps = total_deposited == 0 ? 0 : util_bps      // force 0 when empty
 
-    // Per-block rate: annual * 1e12 / (2,102,400 * 10,000)
-    borrow_rate_pb = borrow_rate_annual * INDEX_SCALE / 21,024,000,000
+// Borrow rate (annual, in BPS): 200 + 400 * util_bps / 10000
+borrow_rate_annual = 200 + (400 * util_bps) / 10000
 
-    // Supply rate per block
-    supply_rate_pb = borrow_rate_pb * util_bps * 9000 / 100,000,000
+// Per-block rate: annual * 1e12 / (2,102,400 * 10,000)
+borrow_rate_pb = borrow_rate_annual * INDEX_SCALE / 21,024,000,000
 
-    // Update indices
-    supply_index += supply_index * supply_rate_pb * effective_delta / INDEX_SCALE
-    borrow_index += borrow_index * borrow_rate_pb * effective_delta / INDEX_SCALE
+// Supply rate per block
+supply_rate_pb = borrow_rate_pb * util_bps * 9000 / 100,000,000
 
-    // Protocol fees (10% of borrow interest)
-    interest_amount = total_borrowed * borrow_rate_pb / INDEX_SCALE
-    fee_delta = interest_amount * effective_delta * 1000 / 10000
-    protocol_fees += fee_delta
+// Index updates — conditional on BOTH delta > 0 AND deposits > 0
+new_supply_index = supply_index + supply_index * supply_rate_pb * effective_delta / INDEX_SCALE
+supply_index = should_update_indices ? new_supply_index : supply_index
 
-    // APY (annualized, in BPS * 100 for precision)
-    supply_apy = supply_rate_pb * 2,102,400 * 10000 / INDEX_SCALE
-    borrow_apy = borrow_rate_pb * 2,102,400 * 10000 / INDEX_SCALE
+new_borrow_index = borrow_index + borrow_index * borrow_rate_pb * effective_delta / INDEX_SCALE
+borrow_index = should_update_indices ? new_borrow_index : borrow_index
 
-    last_accrual_block += effective_delta
+// Protocol fees — conditional on should_update_indices
+interest_amount = total_borrowed * borrow_rate_pb / INDEX_SCALE
+fee_delta = interest_amount * effective_delta * 1000 / 10000
+protocol_fees += should_update_indices ? fee_delta : 0
+
+// APY writes — UNCONDITIONAL (always written, matching v91 lines 158-159)
+supply_apy = supply_rate_pb * 2,102,400 * 10000 / INDEX_SCALE
+borrow_apy = borrow_rate_pb * 2,102,400 * 10000 / INDEX_SCALE
+
+// last_accrual_block — conditional on delta > 0 ONLY (NOT on deposits > 0)
+// This is critical: block advances even when pool is empty, preventing
+// retroactive interest accrual when deposits resume.
+last_accrual_block = should_accrue ? (lub + effective_delta) : lub
 ```
+
+**Important v91 behavior notes:**
+1. `last_accrual_block` advances whenever `effective_delta > 0`, regardless of whether the pool has deposits. This prevents interest from being retroactively calculated over the empty period.
+2. Index updates and protocol fees only apply when `effective_delta > 0 AND total_deposited > 0`.
+3. APY values are always written (unconditionally), even when delta is 0 or pool is empty.
+4. All arithmetic uses `u64`. Operational bounds: pool size should stay below ~1.8e15 micro-units (~1.8 billion USDC) to avoid overflow in `total_borrowed * 10000`.
 
 ## USDCx Transfer Mechanism
 
@@ -257,7 +293,7 @@ let (change, f_transfer) = credits.aleo/transfer_private_to_public(record, VAULT
 let (compliance, to_user, to_pool, f_transfer) =
     test_usdcx_stablecoin.aleo/transfer_private(VAULT, amount_u128, token, proofs);
 // Returns: (ComplianceRecord, Token, Token, Future)
-// ComplianceRecord is discarded (not returned from transition)
+// ComplianceRecord MUST be output from the transition (Leo records cannot be silently dropped)
 // to_user = change token back to user
 // to_pool = token sent to vault
 ```
@@ -274,9 +310,9 @@ The `amount` parameter is `u64` in pool logic but must be cast to `u128` for the
 | Transfer fn | `transfer_private_to_public` | `transfer_private` |
 | Amount type | `u64` | `u64` (cast to `u128` for token call) |
 | MerkleProof | Not needed | Local struct + `[MerkleProof; 2]` param |
-| Deposit outputs | `(UserActivity, credits, Future)` | `(UserActivity, Token, Token, Future)` |
-| Repay outputs | `(UserActivity, credits, Future)` | `(UserActivity, Token, Token, Future)` |
-| Constructor | `program_owner` based | `@admin` attribute based |
+| Deposit outputs | `(UserActivity, credits, Future)` | `(ComplianceRecord, UserActivity, Token, Token, Future)` |
+| Repay outputs | `(UserActivity, credits, Future)` | `(ComplianceRecord, UserActivity, Token, Token, Future)` |
+| Constructor | `program_owner` based | `program_owner` based (same pattern as v91) |
 
 ## Non-Goals
 
