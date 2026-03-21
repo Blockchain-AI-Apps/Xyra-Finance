@@ -27,16 +27,23 @@ import test_usdcx_stablecoin.aleo
 
 ## Architecture
 
-### Local Struct (Shield Wallet Compatibility)
+### MerkleProof Type (Fully-Qualified Import)
 
-The `MerkleProof` struct must be defined locally in the program to produce unqualified `[MerkleProof; 2u32]` in the AVM output. Using the imported `test_usdcx_stablecoin.aleo/MerkleProof` produces fully-qualified names that Shield wallet cannot parse.
+Leo 3.5.0 requires fully-qualified type references for imported structs. The MerkleProof type is used directly from the import:
 
 ```leo
-struct MerkleProof {
-    siblings: [field; 16],
-    leaf_index: u32,
-}
+proofs: [test_usdcx_stablecoin.aleo/MerkleProof; 2]
 ```
+
+This produces `[test_usdcx_stablecoin.aleo/MerkleProof; 2u32]` in the AVM output. Testing confirmed that local struct definitions and bare type names both fail to compile on Leo 3.5.0.
+
+### Transfer Function: `transfer_private_to_public`
+
+Uses `transfer_private_to_public` instead of `transfer_private`:
+- Vault receives **public balance** (auditable on-chain via `balances` mapping)
+- Amount and recipient are **public** (matches pool semantics)
+- 3 outputs (ComplianceRecord, Token change, Future) vs 4 for `transfer_private`
+- Exact parallel to v91's `credits.aleo/transfer_private_to_public`
 
 ### Constants
 
@@ -114,12 +121,12 @@ Inputs:
   - amount: u64 (public)
   - proofs: [MerkleProof; 2]
 
-Outputs (5 values):
-  - ComplianceRecord (from transfer_private — must be output, records cannot be dropped in Leo)
+Outputs (4 values):
+  - ComplianceRecord (from transfer_private_to_public — must be output, records cannot be dropped in Leo)
   - UserActivity record (asset_id=1field, total_deposits=amount)
   - Token (change back to user)
-  - Token (sent to pool vault)
   - Future
+  NOTE: No vault Token — transfer_private_to_public credits vault via public balances mapping
 
 Transition logic:
   1. Assert amount > 0, caller == token.owner
@@ -290,12 +297,12 @@ let (change, f_transfer) = credits.aleo/transfer_private_to_public(record, VAULT
 // Returns: (credits record, Future)
 
 // USDCx:
-let (compliance, to_user, to_pool, f_transfer) =
-    test_usdcx_stablecoin.aleo/transfer_private(VAULT, amount_u128, token, proofs);
-// Returns: (ComplianceRecord, Token, Token, Future)
+let (compliance, change_token, f_transfer) =
+    test_usdcx_stablecoin.aleo/transfer_private_to_public(VAULT, amount_u128, token, proofs);
+// Returns: (ComplianceRecord, Token, Future)
 // ComplianceRecord MUST be output from the transition (Leo records cannot be silently dropped)
-// to_user = change token back to user
-// to_pool = token sent to vault
+// change_token = remaining balance back to user
+// Vault receives public balance via balances mapping (no Token record for vault)
 ```
 
 The `amount` parameter is `u64` in pool logic but must be cast to `u128` for the token transfer call. Assert `token.amount >= amount as u128` before calling.
@@ -307,12 +314,12 @@ The `amount` parameter is `u64` in pool logic but must be cast to `u128` for the
 | Program name | `lending_pool_v91.aleo` | `lending_pool_usdcx_v1.aleo` |
 | Import | `credits.aleo` | `test_usdcx_stablecoin.aleo` |
 | Asset ID | `0field` | `1field` |
-| Transfer fn | `transfer_private_to_public` | `transfer_private` |
+| Transfer fn | `transfer_private_to_public` | `transfer_private_to_public` |
 | Amount type | `u64` | `u64` (cast to `u128` for token call) |
-| MerkleProof | Not needed | Local struct + `[MerkleProof; 2]` param |
-| Deposit outputs | `(UserActivity, credits, Future)` | `(ComplianceRecord, UserActivity, Token, Token, Future)` |
-| Repay outputs | `(UserActivity, credits, Future)` | `(ComplianceRecord, UserActivity, Token, Token, Future)` |
-| Constructor | `program_owner` based | `program_owner` based (same pattern as v91) |
+| MerkleProof | Not needed | Fully-qualified `[test_usdcx_stablecoin.aleo/MerkleProof; 2]` |
+| Deposit outputs | `(UserActivity, credits, Future)` | `(ComplianceRecord, UserActivity, Token, Future)` |
+| Repay outputs | `(UserActivity, credits, Future)` | `(ComplianceRecord, UserActivity, Token, Future)` |
+| Constructor | `program_owner` based (AVM) | `@admin(address=...)` decorator (Leo 3.5.0 syntax, compiles to same AVM) |
 
 ## Non-Goals
 

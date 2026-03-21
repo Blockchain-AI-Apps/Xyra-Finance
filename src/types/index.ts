@@ -9,7 +9,7 @@ export const CURRENT_NETWORK: Network = Network.TESTNET;
 // Default Aleo RPC host for testnet-beta used by the starter template.
 // This is the endpoint that supports the custom JSON-RPC methods used in `rpc.ts`
 // such as `executeTransition`, `getMappingValue`, and `aleoTransactionsForProgram`.
-export const CURRENT_RPC_URL = "https://testnetbeta.aleorpc.com";
+export const CURRENT_RPC_URL = "https://api.explorer.provable.com/v1";
 
 export type NextPageWithLayout<P = {}> = NextPage<P> & {
   authorization?: boolean;
@@ -40,8 +40,8 @@ export type BountyData = {
 // Aleo program ID for the first lending pool (lending_pool_v86: micro-ALEO amounts, real interest/APY, current_block in transitions).
 export const BOUNTY_PROGRAM_ID = 'lending_pool_v86.aleo';
 
-// USDC pool program: lending_pool_usdce_v86.aleo — v86-style interest/APY, current_block, scaled balances.
-export const USDC_POOL_PROGRAM_ID = 'lending_pool_usdce_v86.aleo';
+// USDC pool program: lending_pool_usdcx_v1.aleo — v91-style interest/APY, block.height, LTV checks, protocol fees.
+export const USDC_POOL_PROGRAM_ID = 'lending_pool_usdcx_v2.aleo';
 
 // USDCx token program (Provable testnet): required for Token records used in USDC pool deposit/repay/withdraw/borrow.
 export const USDC_TOKEN_PROGRAM_ID = 'test_usdcx_stablecoin.aleo';

@@ -25,6 +25,7 @@ import {
   lendingRepayUsdc,
   lendingWithdrawUsdc,
   getSuitableUsdcTokenRecord,
+
   getPrivateUsdcBalance,
   lendingAccrueInterest,
   lendingAccrueInterestUsdc,
@@ -38,7 +39,7 @@ import {
   getPrivateCreditsBalance,
 } from '@/components/aleo/rpc';
 import { frontendLogger } from '@/utils/logger';
-import { CURRENT_NETWORK } from '@/types';
+import { CURRENT_NETWORK, USDC_TOKEN_PROGRAM_ID } from '@/types';
 import { getSupabaseBrowserClient } from '@/utils/supabase/client';
 
 // Frontend app environment: 'dev' or 'prod' (default to dev for non-production NODE_ENV)
@@ -767,6 +768,12 @@ const DashboardPage: NextPageWithLayout = () => {
         } catch (e: any) {
           console.warn('⚠️ Failed to pre-initialize permissions for credits.aleo:', e?.message);
         }
+        try {
+          await requestRecords(USDC_TOKEN_PROGRAM_ID, false);
+          console.log(`✅ Wallet record permissions initialized for ${USDC_TOKEN_PROGRAM_ID}`);
+        } catch (e: any) {
+          console.warn(`⚠️ Failed to pre-initialize permissions for ${USDC_TOKEN_PROGRAM_ID}:`, e?.message);
+        }
       } finally {
         setWalletPermissionsInitialized(true);
       }
@@ -1182,7 +1189,6 @@ const DashboardPage: NextPageWithLayout = () => {
           return;
         }
       }
-      setActionModalSubmitted(true);
       let tx: string;
       switch (action) {
         case 'deposit': {
@@ -1205,6 +1211,7 @@ const DashboardPage: NextPageWithLayout = () => {
               }
             }
           }
+          setActionModalSubmitted(true);
           tx = await lendingDepositUsdc(executeTransaction, amountUsdc, tokenRecord);
           break;
         }
@@ -1228,14 +1235,17 @@ const DashboardPage: NextPageWithLayout = () => {
               }
             }
           }
+          setActionModalSubmitted(true);
           tx = await lendingRepayUsdc(executeTransaction, amountUsdc, tokenRecord);
           break;
         }
         case 'withdraw': {
+          setActionModalSubmitted(true);
           tx = await lendingWithdrawUsdc(executeTransaction, amountUsdc);
           break;
         }
         case 'borrow': {
+          setActionModalSubmitted(true);
           tx = await lendingBorrowUsdc(executeTransaction, amountUsdc);
           break;
         }

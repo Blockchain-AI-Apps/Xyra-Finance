@@ -1,0 +1,22 @@
+{
+  "name": "@nullpay/node",
+  "version": "1.0.0",
+  "description": "NullPay SDK for Node.js",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc"
+  },
+  "dependencies": {
+    "axios": "^1.6.0",
+    "node-fetch": "^2.7.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.4.0",
+    "@types/node-fetch": "^2.6.13",
+    "typescript": "^5.9.3"
+  }
+}

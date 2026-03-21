@@ -1005,9 +1005,18 @@ export async function lendingWithdraw(
 const USDC_TOKEN_PROGRAM = USDC_TOKEN_PROGRAM_ID;
 
 /**
- * Placeholder [MerkleProof; 2] matching wallet format: leaf_index 1u32, 16 siblings per proof.
- * Same shape as wallet: "[{ siblings: [0field,...], leaf_index: 1u32 }, { ... }]".
+ * Placeholder MerkleProof struct for v6 split-proof signature: leaf_index 1u32, 16 zero siblings.
  * Placeholder (all zeros) still causes "proving failed" on-chain; use wallet/API proofs when available.
+ */
+const DEFAULT_USDC_MERKLE_PROOF_SENDER =
+  '{ siblings: [0field, 0field, 0field, 0field, 0field, 0field, 0field, 0field, 0field, 0field, 0field, 0field, 0field, 0field, 0field, 0field], leaf_index: 1u32 }';
+const DEFAULT_USDC_MERKLE_PROOF_RECIPIENT =
+  '{ siblings: [0field, 0field, 0field, 0field, 0field, 0field, 0field, 0field, 0field, 0field, 0field, 0field, 0field, 0field, 0field, 0field], leaf_index: 1u32 }';
+
+/**
+ * Combined [MerkleProof; 2] for get_credentials. Both proofs use leaf_index=1 with all-zero siblings.
+ * With leaf_index=1 (odd, single-entry freeze list), all non-inclusion assertions trivially pass,
+ * and the computed root equals hash.psd4([1field, 0field, 0field]) = the actual on-chain freeze_list_root.
  */
 const DEFAULT_USDC_MERKLE_PROOFS =
   '[{ siblings: [0field, 0field, 0field, 0field, 0field, 0field, 0field, 0field, 0field, 0field, 0field, 0field, 0field, 0field, 0field, 0field], leaf_index: 1u32 }, { siblings: [0field, 0field, 0field, 0field, 0field, 0field, 0field, 0field, 0field, 0field, 0field, 0field, 0field, 0field, 0field, 0field], leaf_index: 1u32 }]';
@@ -1335,14 +1344,70 @@ function handleUsdcTxError(error: any, action: string): string {
 }
 
 /**
- * USDC deposit: lending_pool_usdce_v86.aleo/deposit(token, amount, current_block, proofs) — 4 inputs.
- * Amount in human USDC; converted to micro-USDC for the program.
+ * Fetch an unspent Credentials.record for the user from test_usdcx_stablecoin.aleo.
+ * Returns the first unspent Credentials record found, or null if none.
+ */
+export async function getUsdcCredentialsRecord(
+  requestRecords: (program: string, includeSpent?: boolean) => Promise<any[]>
+): Promise<any | null> {
+  try {
+    const records = await requestRecords(USDC_TOKEN_PROGRAM, false);
+    if (!Array.isArray(records)) return null;
+    const cred = records.find((r: any) => {
+      const name = (r?.recordName ?? r?.record_name ?? r?.data?.recordName ?? '').toString();
+      return name === 'Credentials';
+    });
+    return cred ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Get a Credentials.record from test_usdcx_stablecoin.aleo/get_credentials.
+ * Called once; the record is returned after each deposit/repay for reuse.
+ * `proofs` is a [MerkleProof; 2] array string using LOCAL (non-qualified) MerkleProof types —
+ * the wallet parses this fine since MerkleProof is local to test_usdcx_stablecoin.aleo's AVM.
+ * Merkle tree has one entry (zero address at index 0); root = 3642222252059314292809609689035560016959342421640560347114299934615987159853field.
+ */
+export async function getUsdcCredentials(
+  executeTransaction: ((tx: any) => Promise<any>) | undefined,
+  proofs?: string
+): Promise<string> {
+  if (!executeTransaction) throw new Error('executeTransaction is not available.');
+  try {
+    // Always pass [MerkleProof; 2] as input[0]. Shield requires exactly 1 input.
+    // If no proofs supplied, use the known-valid all-zero proof (leaf_index=1).
+    const inputs = [proofs ?? DEFAULT_USDC_MERKLE_PROOFS];
+    const result = await executeTransaction({
+      program: USDC_TOKEN_PROGRAM,
+      function: 'get_credentials',
+      inputs,
+      fee: DEFAULT_LENDING_FEE * 1_000_000,
+      privateFee: false,
+    });
+    const tempId = result?.transactionId;
+    if (!tempId) throw new Error('get_credentials failed: No transactionId returned.');
+    return tempId;
+  } catch (error: any) {
+    return handleUsdcTxError(error, 'get_credentials');
+  }
+}
+
+// Static all-zero MerkleProof array for freeze-list compliance (same pattern as v86).
+// [MerkleProof; 2u32] with siblings=[0field×16], leaf_index=1u32.
+const STATIC_MERKLE_PROOFS =
+  '[{siblings: [0field, 0field, 0field, 0field, 0field, 0field, 0field, 0field, 0field, 0field, 0field, 0field, 0field, 0field, 0field, 0field], leaf_index: 1u32}, {siblings: [0field, 0field, 0field, 0field, 0field, 0field, 0field, 0field, 0field, 0field, 0field, 0field, 0field, 0field, 0field, 0field], leaf_index: 1u32}]';
+
+/**
+ * USDC deposit: lending_pool_usdcx_v1.aleo/deposit(token, amount, proofs) — 3 inputs.
+ * Uses transfer_private_to_public. No current_block param (uses block.height in finalize).
+ * Proofs are passed as a static all-zero MerkleProof array (freeze-list compliance).
  */
 export async function lendingDepositUsdc(
   executeTransaction: ((tx: any) => Promise<any>) | undefined,
   amount: number,
-  tokenRecord: any,
-  proofs?: [string, string] | string
+  tokenRecord: any
 ): Promise<string> {
   if (!executeTransaction) throw new Error('executeTransaction is not available.');
   if (amount <= 0) throw new Error('Deposit amount must be greater than 0');
@@ -1354,29 +1419,10 @@ export async function lendingDepositUsdc(
     }
     const amountMicro = Math.round(amount * 1_000_000);
     const amountStr = `${amountMicro}u64`;
-    const currentBlock = await getLatestBlockHeight();
-    const currentBlockStr = `${Math.max(0, currentBlock)}u64`;
-    let proofsEncoded: string;
-    if (typeof proofs === 'string' && proofs.trim().startsWith('[') && proofs.includes('siblings')) {
-      proofsEncoded = proofs.trim();
-    } else {
-      const proofsInput = Array.isArray(proofs) && proofs.length >= 2
-        ? [String(proofs[0]).trim(), String(proofs[1]).trim()]
-        : ['', ''];
-      proofsEncoded =
-        proofsInput.every(Boolean) && proofsInput[0] && proofsInput[1]
-          ? (proofsInput[0].startsWith('{') ? `[${proofsInput[0]}, ${proofsInput[1]}]` : proofsInput.join(','))
-          : DEFAULT_USDC_MERKLE_PROOFS;
-    }
 
-    const inputs: (string | any)[] = [tokenInput, amountStr, currentBlockStr, proofsEncoded];
+    const inputs: (string | any)[] = [tokenInput, amountStr, STATIC_MERKLE_PROOFS];
 
-    console.log('[USDC deposit] All 4 inputs:', {
-      input0_token: tokenInput,
-      input1_amount: amountStr,
-      input2_current_block: currentBlockStr,
-      input3_proofs: proofsEncoded,
-    });
+    console.log('[USDC deposit v1] inputs:', { token: typeof tokenInput, amount: amountStr });
 
     const result = await executeTransaction({
       program: USDC_LENDING_POOL_PROGRAM_ID,
@@ -1394,14 +1440,13 @@ export async function lendingDepositUsdc(
 }
 
 /**
- * USDC repay: lending_pool_usdce_v86.aleo/repay(token, amount, current_block, proofs) — 4 inputs.
- * Amount in human USDC; converted to micro-USDC for the program.
+ * USDC repay: lending_pool_usdcx_v1.aleo/repay(token, amount, proofs) — 3 inputs.
+ * Uses transfer_private_to_public. No current_block param (uses block.height in finalize).
  */
 export async function lendingRepayUsdc(
   executeTransaction: ((tx: any) => Promise<any>) | undefined,
   amount: number,
-  tokenRecord: any,
-  proofs?: [string, string] | string
+  tokenRecord: any
 ): Promise<string> {
   if (!executeTransaction) throw new Error('executeTransaction is not available.');
   if (amount <= 0) throw new Error('Repay amount must be greater than 0');
@@ -1413,28 +1458,8 @@ export async function lendingRepayUsdc(
     }
     const amountMicro = Math.round(amount * 1_000_000);
     const amountStr = `${amountMicro}u64`;
-    const currentBlock = await getLatestBlockHeight();
-    const currentBlockStr = `${Math.max(0, currentBlock)}u64`;
-    let proofsEncoded: string;
-    if (typeof proofs === 'string' && proofs.trim().startsWith('[') && proofs.includes('siblings')) {
-      proofsEncoded = proofs.trim();
-    } else {
-      const proofsInput = Array.isArray(proofs) && proofs.length >= 2
-        ? [String(proofs[0]).trim(), String(proofs[1]).trim()]
-        : ['', ''];
-      proofsEncoded =
-        proofsInput.every(Boolean) && proofsInput[0] && proofsInput[1]
-          ? (proofsInput[0].startsWith('{') ? `[${proofsInput[0]}, ${proofsInput[1]}]` : proofsInput.join(','))
-          : DEFAULT_USDC_MERKLE_PROOFS;
-    }
-    const inputs: (string | any)[] = [tokenInput, amountStr, currentBlockStr, proofsEncoded];
 
-    console.log('[USDC repay] All 4 inputs:', {
-      input0_token: tokenInput,
-      input1_amount: amountStr,
-      input2_current_block: currentBlockStr,
-      input3_proofs: proofsEncoded,
-    });
+    const inputs: (string | any)[] = [tokenInput, amountStr, STATIC_MERKLE_PROOFS];
 
     const result = await executeTransaction({
       program: USDC_LENDING_POOL_PROGRAM_ID,
@@ -1459,8 +1484,7 @@ export async function lendingWithdrawUsdc(
   if (amount <= 0) throw new Error('Withdraw amount must be greater than 0');
   try {
     const amountMicro = Math.round(amount * 1_000_000);
-    const currentBlock = await getLatestBlockHeight();
-    const inputs = [`${amountMicro}u64`, `${Math.max(0, currentBlock)}u64`];
+    const inputs = [`${amountMicro}u64`];
     const result = await executeTransaction({
       program: USDC_LENDING_POOL_PROGRAM_ID,
       function: 'withdraw',
@@ -1484,8 +1508,7 @@ export async function lendingBorrowUsdc(
   if (amount <= 0) throw new Error('Borrow amount must be greater than 0');
   try {
     const amountMicro = Math.round(amount * 1_000_000);
-    const currentBlock = await getLatestBlockHeight();
-    const inputs = [`${amountMicro}u64`, `${Math.max(0, currentBlock)}u64`];
+    const inputs = [`${amountMicro}u64`];
     const result = await executeTransaction({
       program: USDC_LENDING_POOL_PROGRAM_ID,
       function: 'borrow',
@@ -1581,20 +1604,19 @@ export async function lendingAccrueInterest(
 }
 
 /**
- * Accrue interest on the USDC pool (lending_pool_usdce_v86.aleo). Same signature as Aleo pool.
+ * Accrue interest on the USDC pool (lending_pool_usdcx_v1.aleo). No inputs — uses block.height in finalize.
  */
 export async function lendingAccrueInterestUsdc(
   executeTransaction: ((tx: any) => Promise<any>) | undefined,
-  currentBlock: number
+  currentBlock?: number
 ): Promise<string> {
   if (!executeTransaction) throw new Error('executeTransaction is not available.');
   const fee = DEFAULT_LENDING_FEE * 1_000_000;
   try {
-    const blockInput = `${Math.max(0, currentBlock)}u64`;
     const result = await executeTransaction({
       program: USDC_LENDING_POOL_PROGRAM_ID,
       function: 'accrue_interest',
-      inputs: [blockInput],
+      inputs: [],
       fee,
       privateFee: false,
     });
@@ -1693,7 +1715,8 @@ export async function getLendingPoolState(): Promise<{
 }
 
 /**
- * Read global pool state for the USDC pool (lending_pool_usdce_v86.aleo).
+ * Read global pool state for the USDC pool (lending_pool_usdcx_v1.aleo).
+ * v1 uses field keys (0field) and different mapping names than the Aleo pool.
  */
 export async function getUsdcLendingPoolState(): Promise<{
   totalSupplied: string | null;
@@ -1702,8 +1725,74 @@ export async function getUsdcLendingPoolState(): Promise<{
   interestIndex: string | null;
   liquidityIndex: string | null;
   borrowIndex: string | null;
+  availableLiquidity: string | null;
+  protocolFees: string | null;
+  supplyApy: string | null;
+  borrowApy: string | null;
 }> {
-  return getLendingPoolStateForProgram(USDC_LENDING_POOL_PROGRAM_ID);
+  const key = '0field';
+  const programId = USDC_LENDING_POOL_PROGRAM_ID;
+
+  try {
+    const requestWithErrorHandling = async (mappingName: string) => {
+      try {
+        return await Promise.resolve(client.request('getMappingValue', {
+          program_id: programId,
+          mapping_name: mappingName,
+          key,
+        }));
+      } catch (err: any) {
+        console.warn(`getUsdcLendingPoolState: Failed to fetch ${mappingName}:`, err?.message);
+        return null;
+      }
+    };
+
+    const [deposited, borrowed, supplyIdx, borrowIdx, availLiq, fees, sApy, bApy] = await Promise.all([
+      requestWithErrorHandling('total_deposited'),
+      requestWithErrorHandling('total_borrowed'),
+      requestWithErrorHandling('supply_index'),
+      requestWithErrorHandling('borrow_index'),
+      requestWithErrorHandling('available_liquidity'),
+      requestWithErrorHandling('protocol_fees'),
+      requestWithErrorHandling('supply_apy'),
+      requestWithErrorHandling('borrow_apy'),
+    ]);
+
+    const extract = (res: any): string | null => {
+      if (res == null) return null;
+      const raw = res.value ?? res ?? null;
+      if (raw == null) return null;
+      const str = String(raw);
+      return str.replace(/u64$/i, '');
+    };
+
+    return {
+      totalSupplied: extract(deposited),
+      totalBorrowed: extract(borrowed),
+      utilizationIndex: null,
+      interestIndex: null,
+      liquidityIndex: extract(supplyIdx),
+      borrowIndex: extract(borrowIdx),
+      availableLiquidity: extract(availLiq),
+      protocolFees: extract(fees),
+      supplyApy: extract(sApy),
+      borrowApy: extract(bApy),
+    };
+  } catch (error: any) {
+    console.error('getUsdcLendingPoolState: Error fetching pool state:', error);
+    return {
+      totalSupplied: null,
+      totalBorrowed: null,
+      utilizationIndex: null,
+      interestIndex: null,
+      liquidityIndex: null,
+      borrowIndex: null,
+      availableLiquidity: null,
+      protocolFees: null,
+      supplyApy: null,
+      borrowApy: null,
+    };
+  }
 }
 
 // --- v86 interest/APY constants (match program lending_pool_v86.aleo) ---
@@ -1746,8 +1835,31 @@ export function computeAleoPoolAPY(
   return { supplyAPY, borrowAPY };
 }
 
-/** Same rate model as Aleo pool (v86); USDC pool uses identical constants. */
-export const computeUsdcPoolAPY = computeAleoPoolAPY;
+/**
+ * USDC pool APY: v1 stores supply_apy and borrow_apy on-chain (in BPS*100).
+ * Can be read directly from mappings via getUsdcLendingPoolState().
+ * This function converts the on-chain values to decimal APY.
+ * Falls back to off-chain computation if on-chain values are unavailable.
+ */
+export function computeUsdcPoolAPY(
+  totalSupplied: number | string,
+  totalBorrowed: number | string,
+  blocksPerYear: number = BLOCKS_PER_YEAR_ALEO,
+  onChainSupplyApy?: number | string | null,
+  onChainBorrowApy?: number | string | null,
+): { supplyAPY: number; borrowAPY: number } {
+  // If on-chain APY values are available, use them (BPS*100 → decimal)
+  if (onChainSupplyApy != null && onChainBorrowApy != null) {
+    const sApy = Number(onChainSupplyApy) || 0;
+    const bApy = Number(onChainBorrowApy) || 0;
+    return {
+      supplyAPY: sApy / 10000,
+      borrowAPY: bApy / 10000,
+    };
+  }
+  // Fallback to off-chain computation
+  return computeAleoPoolAPY(totalSupplied, totalBorrowed, blocksPerYear);
+}
 
 /**
  * Effective supply balance = (user_scaled_supply * liquidity_index) / INDEX_SCALE.
@@ -1776,11 +1888,14 @@ export async function getAleoPoolUserEffectivePosition(
         return null;
       }
     };
-    const globalKey = '0u8';
+    // v1 USDC pool uses field keys (0field) and supply_index; Aleo pool uses u8 keys (0u8) and liquidity_index
+    const isUsdcPool = programId === USDC_LENDING_POOL_PROGRAM_ID;
+    const globalKey = isUsdcPool ? '0field' : '0u8';
+    const supplyIndexName = isUsdcPool ? 'supply_index' : 'liquidity_index';
     const [scaledSupply, scaledBorrow, liquidityIndex, borrowIndex] = await Promise.all([
       requestWithErrorHandling('user_scaled_supply', userHash),
       requestWithErrorHandling('user_scaled_borrow', userHash),
-      requestWithErrorHandling('liquidity_index', globalKey),
+      requestWithErrorHandling(supplyIndexName, globalKey),
       requestWithErrorHandling('borrow_index', globalKey),
     ]);
     const li = liquidityIndex ?? BigInt(INDEX_SCALE_ALEO);

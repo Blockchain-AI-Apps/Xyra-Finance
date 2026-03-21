@@ -1,0 +1,16 @@
+{
+  "name": "@nullpay/core",
+  "version": "1.0.0",
+  "description": "Shared utility functions and types for NullPay SDKs",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc"
+  },
+  "dependencies": {
+    "@provablehq/sdk": "^0.9.17"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0"
+  }
+}

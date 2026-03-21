@@ -1,0 +1,9 @@
+{
+  "name": "nullpay-monorepo",
+  "private": true,
+  "workspaces": [
+    "frontend",
+    "backend",
+    "packages/*"
+  ]
+}

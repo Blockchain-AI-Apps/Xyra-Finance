@@ -1,0 +1,113 @@
+{
+  "program": "test_transfer_usdcx_v2.aleo",
+  "structs": [],
+  "records": [
+    {
+      "path": [
+        "UserActivity"
+      ],
+      "fields": [
+        {
+          "name": "owner",
+          "ty": {
+            "Primitive": "Address"
+          },
+          "mode": "None"
+        },
+        {
+          "name": "asset_id",
+          "ty": {
+            "Primitive": "Field"
+          },
+          "mode": "None"
+        },
+        {
+          "name": "total_deposits",
+          "ty": {
+            "Primitive": {
+              "UInt": "U64"
+            }
+          },
+          "mode": "None"
+        },
+        {
+          "name": "total_withdrawals",
+          "ty": {
+            "Primitive": {
+              "UInt": "U64"
+            }
+          },
+          "mode": "None"
+        },
+        {
+          "name": "total_borrows",
+          "ty": {
+            "Primitive": {
+              "UInt": "U64"
+            }
+          },
+          "mode": "None"
+        },
+        {
+          "name": "total_repayments",
+          "ty": {
+            "Primitive": {
+              "UInt": "U64"
+            }
+          },
+          "mode": "None"
+        }
+      ]
+    }
+  ],
+  "mappings": [
+    {
+      "name": "total_deposited",
+      "key": {
+        "Primitive": "Field"
+      },
+      "value": {
+        "Primitive": {
+          "UInt": "U64"
+        }
+      }
+    }
+  ],
+  "storage_variables": [],
+  "transitions": [
+    {
+      "name": "deposit",
+      "is_async": true,
+      "inputs": [
+        {
+          "name": "amount",
+          "ty": {
+            "Plaintext": {
+              "Primitive": {
+                "UInt": "U64"
+              }
+            }
+          },
+          "mode": "Public"
+        }
+      ],
+      "outputs": [
+        {
+          "ty": {
+            "Record": {
+              "path": [
+                "UserActivity"
+              ],
+              "program": "test_transfer_usdcx_v2"
+            }
+          },
+          "mode": "None"
+        },
+        {
+          "ty": "Future",
+          "mode": "None"
+        }
+      ]
+    }
+  ]
+}
